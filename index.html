@@ -1,0 +1,1541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hollywood Car Wash — Vehicle Inspection</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=Bungee+Shade&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<style>
+  :root {
+    --yellow: #FFD400;
+    --yellow-soft: #FFE872;
+    --red: #E10600;
+    --red-deep: #B30500;
+    --black: #0A0A0A;
+    --ink: #141414;
+    --panel: #1A1A1A;
+    --line: #2A2A2A;
+    --muted: #888;
+    --white: #F5F5F5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Manrope', sans-serif;
+    background: var(--black);
+    color: var(--white);
+    overflow-x: hidden;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(circle at 20% 0%, rgba(225,6,0,0.08) 0%, transparent 50%),
+      radial-gradient(circle at 80% 100%, rgba(255,212,0,0.06) 0%, transparent 50%);
+  }
+  .app {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 20px 48px;
+    min-height: 100vh;
+  }
+  /* ----- HEADER ----- */
+  .marquee {
+    border: 3px solid var(--yellow);
+    background: var(--black);
+    border-radius: 4px;
+    padding: 18px 22px;
+    margin-bottom: 28px;
+    position: relative;
+    box-shadow: 0 0 0 6px var(--black), 0 0 0 8px var(--red), 6px 6px 0 8px var(--yellow);
+  }
+  .marquee::before, .marquee::after {
+    content: "★";
+    position: absolute;
+    top: 50%; transform: translateY(-50%);
+    color: var(--yellow);
+    font-size: 24px;
+    text-shadow: 0 0 20px var(--yellow);
+  }
+  .marquee::before { left: 14px; }
+  .marquee::after { right: 14px; }
+  .brand {
+    text-align: center;
+    font-family: 'Bungee', cursive;
+    color: var(--yellow);
+    letter-spacing: 0.04em;
+    font-size: clamp(22px, 4vw, 36px);
+    line-height: 1;
+    text-shadow: 3px 3px 0 var(--red);
+  }
+  .sub {
+    text-align: center;
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.3em;
+    margin-top: 6px;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+  /* ----- FILMSTRIP ----- */
+  .filmstrip {
+    height: 18px;
+    background: var(--black);
+    border-top: 2px solid var(--yellow);
+    border-bottom: 2px solid var(--yellow);
+    margin: -8px 0 24px;
+    background-image:
+      linear-gradient(90deg, var(--black) 0, var(--black) 6px, transparent 6px, transparent 14px),
+      linear-gradient(var(--ink) 0, var(--ink) 100%);
+    background-size: 14px 100%;
+  }
+  /* ----- SCREENS ----- */
+  .screen { display: none; animation: fadeIn 0.35s ease; }
+  .screen.active { display: block; }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  /* ----- PANELS ----- */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 24px;
+    margin-bottom: 18px;
+  }
+  .panel-title {
+    font-family: 'Bungee', cursive;
+    color: var(--yellow);
+    font-size: 18px;
+    letter-spacing: 0.04em;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .panel-title .num {
+    background: var(--red);
+    color: var(--white);
+    width: 28px; height: 28px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 14px;
+    border-radius: 2px;
+  }
+  /* ----- FORMS ----- */
+  label {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--yellow);
+    margin-bottom: 6px;
+  }
+  input[type="text"], select {
+    width: 100%;
+    padding: 12px 14px;
+    background: var(--black);
+    border: 1px solid var(--line);
+    color: var(--white);
+    font-family: 'Manrope', sans-serif;
+    font-size: 15px;
+    border-radius: 4px;
+    transition: border-color 0.2s;
+  }
+  input[type="text"]:focus, select:focus {
+    outline: none;
+    border-color: var(--yellow);
+  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 600px) { .grid-2 { grid-template-columns: 1fr; } }
+  .field { margin-bottom: 14px; }
+  /* ----- BUTTONS ----- */
+  .btn {
+    font-family: 'Bungee', cursive;
+    letter-spacing: 0.05em;
+    border: none;
+    padding: 14px 24px;
+    font-size: 15px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: transform 0.1s, box-shadow 0.1s;
+    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary {
+    background: var(--yellow);
+    color: var(--black);
+    box-shadow: 4px 4px 0 var(--red);
+  }
+  .btn-primary:hover { box-shadow: 6px 6px 0 var(--red); }
+  .btn-primary:disabled {
+    background: #444; color: #777; cursor: not-allowed; box-shadow: none;
+  }
+  .btn-danger {
+    background: var(--red);
+    color: var(--white);
+    box-shadow: 4px 4px 0 var(--yellow);
+  }
+  .btn-danger:hover { box-shadow: 6px 6px 0 var(--yellow); }
+  .btn-ghost {
+    background: transparent;
+    color: var(--yellow);
+    border: 2px solid var(--yellow);
+  }
+  .btn-ghost:hover { background: var(--yellow); color: var(--black); }
+  .btn-row {
+    display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px;
+  }
+  /* ----- VIDEO ----- */
+  .video-wrap {
+    position: relative;
+    background: #000;
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+    aspect-ratio: 16/9;
+  }
+  video {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    background: #000;
+  }
+  .rec-indicator {
+    position: absolute;
+    top: 14px; left: 14px;
+    background: var(--red);
+    color: white;
+    padding: 6px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    border-radius: 2px;
+    display: none;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+  }
+  .rec-indicator.on { display: inline-flex; }
+  .rec-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: white;
+    animation: blink 1s infinite;
+  }
+  @keyframes blink { 50% { opacity: 0.2; } }
+  .timer {
+    position: absolute;
+    top: 14px; right: 14px;
+    background: rgba(0,0,0,0.7);
+    color: var(--yellow);
+    padding: 6px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    border-radius: 2px;
+  }
+  .clip-status {
+    margin-top: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .clip-status.done { color: var(--yellow); }
+  /* ----- STEPS ----- */
+  .steps {
+    display: flex; gap: 8px; margin-bottom: 22px; flex-wrap: wrap;
+  }
+  .step {
+    flex: 1;
+    min-width: 90px;
+    padding: 10px 8px;
+    border: 1px solid var(--line);
+    background: var(--ink);
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-radius: 3px;
+    position: relative;
+  }
+  .step.active {
+    border-color: var(--yellow);
+    color: var(--yellow);
+    background: var(--black);
+  }
+  .step.done {
+    border-color: var(--red);
+    color: var(--red);
+  }
+  /* ----- PROCESSING ----- */
+  .processing {
+    text-align: center;
+    padding: 48px 20px;
+  }
+  .clapper {
+    width: 120px;
+    height: 120px;
+    margin: 0 auto 24px;
+    position: relative;
+  }
+  .clapper-top {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 28px;
+    background:
+      repeating-linear-gradient(
+        45deg,
+        var(--yellow) 0 14px,
+        var(--black) 14px 28px
+      );
+    transform-origin: bottom left;
+    animation: clap 1.6s ease-in-out infinite;
+    border-radius: 2px 2px 0 0;
+    border: 2px solid var(--black);
+  }
+  .clapper-body {
+    position: absolute;
+    top: 30px; left: 0; right: 0; bottom: 0;
+    background: var(--black);
+    border: 3px solid var(--yellow);
+    border-radius: 2px;
+  }
+  @keyframes clap {
+    0%, 100% { transform: rotate(0deg); }
+    25% { transform: rotate(-25deg); }
+    50% { transform: rotate(0deg); }
+  }
+  .processing h2 {
+    font-family: 'Bungee', cursive;
+    color: var(--yellow);
+    font-size: 22px;
+    margin-bottom: 14px;
+  }
+  .status-list {
+    list-style: none;
+    text-align: left;
+    max-width: 420px;
+    margin: 22px auto 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+  }
+  .status-list li {
+    padding: 8px 0;
+    color: var(--muted);
+    border-bottom: 1px dashed var(--line);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .status-list li.active { color: var(--yellow); }
+  .status-list li.done { color: var(--white); }
+  .status-list li.done::before { content: "✓"; color: var(--yellow); font-weight: 700; }
+  .status-list li.active::before {
+    content: "▶";
+    color: var(--red);
+    animation: pulse 1s infinite;
+  }
+  .status-list li.pending::before { content: "○"; color: var(--muted); }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  /* ----- REPORT ----- */
+  .report-summary {
+    background: var(--ink);
+    border-left: 4px solid var(--red);
+    padding: 18px;
+    border-radius: 0 4px 4px 0;
+    margin-bottom: 18px;
+  }
+  .summary-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--line);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+  }
+  .summary-row:last-child { border-bottom: 0; }
+  .summary-label { color: var(--muted); }
+  .summary-val { color: var(--yellow); font-weight: 700; text-align: right; }
+  .findings {
+    margin-top: 14px;
+  }
+  .finding {
+    padding: 12px 14px;
+    background: var(--black);
+    border-left: 3px solid var(--yellow);
+    margin-bottom: 8px;
+    border-radius: 0 4px 4px 0;
+    font-size: 14px;
+  }
+  .finding.severe { border-left-color: var(--red); }
+  .finding.minor { border-left-color: var(--yellow-soft); }
+  .finding-type {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--yellow);
+    margin-bottom: 4px;
+  }
+  .finding.severe .finding-type { color: var(--red); }
+  .alert {
+    background: rgba(225,6,0,0.1);
+    border: 1px solid var(--red);
+    color: var(--white);
+    padding: 12px 14px;
+    border-radius: 4px;
+    font-size: 13px;
+    margin-bottom: 14px;
+  }
+  .info {
+    background: rgba(255,212,0,0.08);
+    border: 1px solid var(--yellow);
+    color: var(--white);
+    padding: 12px 14px;
+    border-radius: 4px;
+    font-size: 13px;
+    margin-bottom: 14px;
+  }
+  /* ----- HOME ----- */
+  .home-hero {
+    text-align: center;
+    padding: 30px 20px 10px;
+  }
+  .home-hero p {
+    color: var(--muted);
+    margin: 12px auto 28px;
+    max-width: 540px;
+    line-height: 1.6;
+  }
+  .home-actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 30px;
+  }
+  .folder-status {
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    padding: 14px;
+    border: 1px dashed var(--line);
+    border-radius: 4px;
+    margin-top: 10px;
+  }
+  .folder-status.set { color: var(--yellow); border-color: var(--yellow); }
+  .stars {
+    text-align: center;
+    color: var(--yellow);
+    font-size: 14px;
+    letter-spacing: 1em;
+    margin: 14px 0;
+    opacity: 0.5;
+  }
+  /* ----- FOOTER ----- */
+  .footer {
+    text-align: center;
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .frames-preview {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .frames-preview img {
+    width: 100%;
+    aspect-ratio: 16/9;
+    object-fit: cover;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+  }
+  details {
+    background: var(--ink);
+    padding: 12px 16px;
+    border-radius: 4px;
+    margin-top: 14px;
+    border: 1px solid var(--line);
+  }
+  summary {
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--yellow);
+  }
+  details[open] summary { margin-bottom: 12px; }
+  .raw-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--white);
+    white-space: pre-wrap;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- HEADER -->
+  <div class="marquee">
+    <div class="brand">HOLLYWOOD CAR WASH</div>
+    <div class="sub">★ Vehicle Inspection System ★</div>
+  </div>
+  <div class="filmstrip"></div>
+
+  <!-- ============ SCREEN: HOME ============ -->
+  <div class="screen active" id="screen-home">
+    <div class="home-hero">
+      <h1 style="font-family:'Bungee',cursive;font-size:clamp(28px,5vw,44px);color:var(--white);line-height:1.1;">
+        LIGHTS. CAMERA.<br/>
+        <span style="color:var(--red);">INSPECTION.</span>
+      </h1>
+      <div class="stars">★ ★ ★</div>
+      <p>Record exterior and interior video of the vehicle. AI scans for dents and scratches, reads the plate, and drops a PDF report into your designated folder.</p>
+    </div>
+    <div class="home-actions">
+      <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
+      <button class="btn btn-ghost" onclick="pickFolder()">📁 SET REPORT FOLDER</button>
+      <a class="btn btn-ghost" href="/reports" target="_blank" style="text-decoration:none;">📋 VIEW REPORTS</a>
+    </div>
+    <div class="folder-status" id="folder-status">
+      No folder selected — reports will download to your Downloads folder by default.
+    </div>
+    <div class="info" style="margin-top:18px;">
+      💡 <strong>Pro tip:</strong> For network drops, pick a mapped network drive (like <code>Z:\\HollywoodReports</code>). The report will save there automatically once permission is granted.
+    </div>
+  </div>
+
+  <!-- ============ SCREEN: SETUP ============ -->
+  <div class="screen" id="screen-setup">
+    <div class="steps">
+      <div class="step active">1. Setup</div>
+      <div class="step">2. Exterior</div>
+      <div class="step">3. Interior</div>
+      <div class="step">4. Report</div>
+    </div>
+    <div class="panel">
+      <div class="panel-title"><span class="num">1</span> Inspection Details</div>
+      <div class="grid-2">
+        <div class="field">
+          <label for="tech-name">Technician Name</label>
+          <input type="text" id="tech-name" placeholder="e.g. Marco R." />
+        </div>
+        <div class="field">
+          <label for="customer-name">Customer Name (optional)</label>
+          <input type="text" id="customer-name" placeholder="e.g. John Smith" />
+        </div>
+        <div class="field">
+          <label for="vehicle-make">Make / Model (optional)</label>
+          <input type="text" id="vehicle-make" placeholder="e.g. Toyota Camry" />
+        </div>
+        <div class="field">
+          <label for="vehicle-color">Vehicle Color (optional)</label>
+          <input type="text" id="vehicle-color" placeholder="e.g. Silver" />
+        </div>
+        <div class="field">
+          <label for="bay-num">Bay / Stall Number</label>
+          <input type="text" id="bay-num" placeholder="e.g. Bay 3" />
+        </div>
+        <div class="field">
+          <label for="service-type">Service Type</label>
+          <select id="service-type">
+            <option>Full Detail</option>
+            <option>Exterior Only</option>
+            <option>Interior Only</option>
+            <option>Express Wash</option>
+            <option>Pre-Service Inspection</option>
+          </select>
+        </div>
+      </div>
+      <div class="info">
+        Optional fields can be left blank — AI will fill in what it can detect from the video. The plate and visible damage are extracted automatically.
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" onclick="show('home')">← Back</button>
+        <button class="btn btn-primary" onclick="goToExterior()">Continue → Exterior</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN: EXTERIOR ============ -->
+  <div class="screen" id="screen-exterior">
+    <div class="steps">
+      <div class="step done">1. Setup ✓</div>
+      <div class="step active">2. Exterior</div>
+      <div class="step">3. Interior</div>
+      <div class="step">4. Report</div>
+    </div>
+    <div class="panel">
+      <div class="panel-title"><span class="num">2</span> Exterior Walk-around</div>
+      <p style="margin-bottom:14px;color:var(--muted);font-size:14px;">
+        Walk around the vehicle slowly. Capture all four sides, including the license plate clearly. Aim for 30–60 seconds.
+      </p>
+      <div class="video-wrap">
+        <video id="video-ext" autoplay muted playsinline></video>
+        <div class="rec-indicator" id="rec-ext"><span class="rec-dot"></span>REC</div>
+        <div class="timer" id="timer-ext">00:00</div>
+      </div>
+      <div class="clip-status" id="status-ext">Camera not started.</div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" onclick="show('setup')">← Back</button>
+        <button class="btn btn-primary" id="ext-start-btn" onclick="startCamera('ext')">📷 Start Camera</button>
+        <button class="btn btn-danger" id="ext-rec-btn" onclick="toggleRecord('ext')" disabled>● Record</button>
+        <button class="btn btn-primary" id="ext-next-btn" onclick="goToInterior()" disabled>Continue → Interior</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN: INTERIOR ============ -->
+  <div class="screen" id="screen-interior">
+    <div class="steps">
+      <div class="step done">1. Setup ✓</div>
+      <div class="step done">2. Exterior ✓</div>
+      <div class="step active">3. Interior</div>
+      <div class="step">4. Report</div>
+    </div>
+    <div class="panel">
+      <div class="panel-title"><span class="num">3</span> Interior Recording</div>
+      <p style="margin-bottom:14px;color:var(--muted);font-size:14px;">
+        Open the doors and capture front seats, rear seats, dashboard, and trunk. Note any pre-existing stains, tears, or damage.
+      </p>
+      <div class="video-wrap">
+        <video id="video-int" autoplay muted playsinline></video>
+        <div class="rec-indicator" id="rec-int"><span class="rec-dot"></span>REC</div>
+        <div class="timer" id="timer-int">00:00</div>
+      </div>
+      <div class="clip-status" id="status-int">Camera not started.</div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" onclick="goBackToExterior()">← Back</button>
+        <button class="btn btn-primary" id="int-start-btn" onclick="startCamera('int')">📷 Start Camera</button>
+        <button class="btn btn-danger" id="int-rec-btn" onclick="toggleRecord('int')" disabled>● Record</button>
+        <button class="btn btn-primary" id="int-send-btn" onclick="submitInspection()" disabled>📤 SEND & ANALYZE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN: PROCESSING ============ -->
+  <div class="screen" id="screen-processing">
+    <div class="steps">
+      <div class="step done">1. Setup ✓</div>
+      <div class="step done">2. Exterior ✓</div>
+      <div class="step done">3. Interior ✓</div>
+      <div class="step active">4. Report</div>
+    </div>
+    <div class="processing">
+      <div class="clapper">
+        <div class="clapper-top"></div>
+        <div class="clapper-body"></div>
+      </div>
+      <h2>NOW PROCESSING...</h2>
+      <p style="color:var(--muted);font-size:14px;">Please hold while AI reviews the footage.</p>
+      <ul class="status-list" id="status-list">
+        <li class="pending" data-step="frames">Extracting key frames from video</li>
+        <li class="pending" data-step="exterior">Scanning exterior for damage</li>
+        <li class="pending" data-step="plate">Reading license plate</li>
+        <li class="pending" data-step="interior">Scanning interior condition</li>
+        <li class="pending" data-step="pdf">Generating PDF report</li>
+        <li class="pending" data-step="save">Saving to folder</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN: REPORT ============ -->
+  <div class="screen" id="screen-report">
+    <div class="steps">
+      <div class="step done">1. Setup ✓</div>
+      <div class="step done">2. Exterior ✓</div>
+      <div class="step done">3. Interior ✓</div>
+      <div class="step done">4. Report ✓</div>
+    </div>
+    <div class="panel">
+      <div class="panel-title"><span class="num">★</span> Inspection Complete</div>
+      <div id="save-result"></div>
+      <div class="report-summary" id="report-summary"></div>
+      <h3 style="font-family:'Bungee',cursive;color:var(--yellow);font-size:14px;letter-spacing:0.05em;margin:18px 0 10px;">EXTERIOR FINDINGS</h3>
+      <div class="findings" id="findings-ext"></div>
+      <h3 style="font-family:'Bungee',cursive;color:var(--yellow);font-size:14px;letter-spacing:0.05em;margin:18px 0 10px;">INTERIOR FINDINGS</h3>
+      <div class="findings" id="findings-int"></div>
+      <details>
+        <summary>Sampled frames</summary>
+        <div class="frames-preview" id="frames-preview"></div>
+      </details>
+      <details>
+        <summary>Raw AI analysis (debug)</summary>
+        <div class="raw-text" id="raw-text"></div>
+      </details>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="downloadReport()">📥 DOWNLOAD PDF AGAIN</button>
+        <button class="btn btn-ghost" onclick="resetApp()">+ NEW INSPECTION</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    ★ HOLLYWOOD CAR WASH — VEHICLE INSPECTION SYSTEM ★
+  </div>
+</div>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+const state = {
+  tech: '', customer: '', make: '', color: '', bay: '', serviceType: '',
+  exteriorBlob: null,
+  interiorBlob: null,
+  exteriorFrames: [],
+  interiorFrames: [],
+  analysis: null,
+  pdfBlob: null,
+  reportName: '',
+  folderHandle: null,
+};
+
+let mediaRecorder = null;
+let mediaStream = null;
+let recordedChunks = [];
+let recordingTarget = null; // 'ext' or 'int'
+let timerInterval = null;
+let recordStart = 0;
+
+// ============================================================
+// SCREEN MGMT
+// ============================================================
+function show(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + name).classList.add('active');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function startInspection() { show('setup'); }
+
+function goToExterior() {
+  state.tech = document.getElementById('tech-name').value.trim() || 'Unspecified';
+  state.customer = document.getElementById('customer-name').value.trim();
+  state.make = document.getElementById('vehicle-make').value.trim();
+  state.color = document.getElementById('vehicle-color').value.trim();
+  state.bay = document.getElementById('bay-num').value.trim();
+  state.serviceType = document.getElementById('service-type').value;
+  show('exterior');
+}
+
+function goToInterior() {
+  stopCamera();
+  show('interior');
+}
+
+function goBackToExterior() {
+  stopCamera();
+  show('exterior');
+  // Re-prep exterior UI based on whether they already recorded
+  if (state.exteriorBlob) {
+    document.getElementById('status-ext').textContent = '✓ Exterior video saved (' + formatBytes(state.exteriorBlob.size) + ')';
+    document.getElementById('status-ext').classList.add('done');
+    document.getElementById('ext-next-btn').disabled = false;
+  }
+}
+
+// ============================================================
+// FOLDER PICKER (File System Access API)
+// ============================================================
+async function pickFolder() {
+  if (!('showDirectoryPicker' in window)) {
+    alert('Your browser does not support direct folder access.\n\nUse Chrome or Edge for this feature, or reports will download normally to your Downloads folder.');
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    state.folderHandle = handle;
+    const el = document.getElementById('folder-status');
+    el.textContent = '✓ Reports will save to: ' + handle.name;
+    el.classList.add('set');
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      console.error(e);
+      alert('Could not access that folder: ' + e.message);
+    }
+  }
+}
+
+// ============================================================
+// CAMERA / RECORDING
+// ============================================================
+async function startCamera(target) {
+  recordingTarget = target;
+  const videoEl = document.getElementById('video-' + target);
+  const status = document.getElementById('status-' + target);
+  try {
+    stopCamera();
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+      audio: false,
+    });
+    videoEl.srcObject = mediaStream;
+    status.textContent = 'Camera ready. Press Record to begin.';
+    document.getElementById(target + '-rec-btn').disabled = false;
+    document.getElementById(target + '-start-btn').textContent = '🔄 Restart Camera';
+  } catch (e) {
+    console.error(e);
+    status.textContent = '⚠️ Camera error: ' + e.message;
+    alert('Could not access camera. Make sure permission is granted.\n\n' + e.message);
+  }
+}
+
+function stopCamera() {
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+  }
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try { mediaRecorder.stop(); } catch {}
+  }
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+}
+
+function toggleRecord(target) {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+  } else {
+    if (!mediaStream) { alert('Start the camera first.'); return; }
+    recordedChunks = [];
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9'
+              : MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8'
+              : 'video/webm';
+    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = () => onRecordingStop(target);
+    mediaRecorder.start();
+    recordStart = Date.now();
+    document.getElementById('rec-' + target).classList.add('on');
+    document.getElementById(target + '-rec-btn').textContent = '■ Stop';
+    document.getElementById(target + '-rec-btn').classList.remove('btn-danger');
+    document.getElementById(target + '-rec-btn').classList.add('btn-primary');
+    document.getElementById('status-' + target).textContent = 'Recording...';
+    timerInterval = setInterval(() => updateTimer(target), 250);
+  }
+}
+
+function updateTimer(target) {
+  const sec = Math.floor((Date.now() - recordStart) / 1000);
+  const m = String(Math.floor(sec / 60)).padStart(2, '0');
+  const s = String(sec % 60).padStart(2, '0');
+  document.getElementById('timer-' + target).textContent = m + ':' + s;
+}
+
+function onRecordingStop(target) {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  document.getElementById('rec-' + target).classList.remove('on');
+  const btn = document.getElementById(target + '-rec-btn');
+  btn.textContent = '↻ Re-record';
+  btn.classList.remove('btn-primary');
+  btn.classList.add('btn-danger');
+  const blob = new Blob(recordedChunks, { type: 'video/webm' });
+  if (target === 'ext') {
+    state.exteriorBlob = blob;
+    document.getElementById('ext-next-btn').disabled = false;
+    document.getElementById('status-ext').textContent = '✓ Exterior recorded (' + formatBytes(blob.size) + ')';
+    document.getElementById('status-ext').classList.add('done');
+  } else {
+    state.interiorBlob = blob;
+    document.getElementById('int-send-btn').disabled = false;
+    document.getElementById('status-int').textContent = '✓ Interior recorded (' + formatBytes(blob.size) + ')';
+    document.getElementById('status-int').classList.add('done');
+  }
+}
+
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+  return (b/1024/1024).toFixed(1) + ' MB';
+}
+
+// ============================================================
+// FRAME EXTRACTION
+// ============================================================
+async function extractFrames(blob, count = 5) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.src = URL.createObjectURL(blob);
+    const frames = [];
+
+    video.onloadedmetadata = async () => {
+      const duration = video.duration;
+      // Some webm blobs have Infinity duration; handle that
+      const dur = (isFinite(duration) && duration > 0) ? duration : 6;
+      const canvas = document.createElement('canvas');
+      // wait for first frame so we can size the canvas
+      await new Promise(r => { if (video.readyState >= 2) r(); else video.onloadeddata = r; });
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 360;
+      const ctx = canvas.getContext('2d');
+
+      for (let i = 0; i < count; i++) {
+        const t = (dur / (count + 1)) * (i + 1);
+        await new Promise(res => {
+          const handler = () => { video.removeEventListener('seeked', handler); res(); };
+          video.addEventListener('seeked', handler);
+          try { video.currentTime = t; } catch { res(); }
+        });
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+        frames.push(dataUrl);
+      }
+      URL.revokeObjectURL(video.src);
+      resolve(frames);
+    };
+    video.onerror = (e) => reject(new Error('Video load failed'));
+  });
+}
+
+// ============================================================
+// AI ANALYSIS via Anthropic API
+// ============================================================
+async function analyzeWithClaude(frames, prompt) {
+  // frames is an array of dataURL strings
+  const content = [];
+  for (const f of frames) {
+    const base64 = f.split(',')[1];
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: "image/jpeg", data: base64 }
+    });
+  }
+  content.push({ type: "text", text: prompt });
+
+  const response = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [{ role: "user", content }]
+    })
+  });
+  if (!response.ok) {
+    const t = await response.text();
+    throw new Error('AI call failed: ' + response.status + ' ' + t);
+  }
+  const data = await response.json();
+  // Concatenate all text blocks
+  const text = (data.content || [])
+    .filter(b => b.type === 'text')
+    .map(b => b.text)
+    .join('\n');
+  return text;
+}
+
+const EXTERIOR_PROMPT = `You are inspecting frames from a car wash pre-service vehicle walk-around video. The frames show the EXTERIOR of a single vehicle.
+
+Respond ONLY with valid JSON, no preamble, no markdown fences. Use this exact schema:
+
+{
+  "license_plate": {
+    "number": "string or null if not readable",
+    "state": "two-letter state code or null",
+    "confidence": "high|medium|low|none",
+    "notes": "any relevant context (e.g. partial read, plate frame branding)"
+  },
+  "vehicle": {
+    "make_model": "best guess or null",
+    "color": "color or null",
+    "body_style": "sedan|suv|truck|coupe|hatchback|van|other or null"
+  },
+  "damage": [
+    {
+      "type": "scratch|dent|chip|crack|paint_damage|missing_part|rust|other",
+      "location": "panel/area description (e.g. 'driver-side rear door, lower section')",
+      "severity": "minor|moderate|severe",
+      "description": "1 sentence"
+    }
+  ],
+  "overall_condition": "excellent|good|fair|poor",
+  "summary": "one short sentence overall"
+}
+
+If no visible damage, return an empty array for "damage". Be conservative — only flag what is clearly visible. Glare, water beads, or shadow are NOT damage.`;
+
+const INTERIOR_PROMPT = `You are inspecting frames from a car wash interior video. The frames show the INSIDE of a vehicle.
+
+Respond ONLY with valid JSON, no preamble, no markdown fences. Schema:
+
+{
+  "issues": [
+    {
+      "type": "stain|tear|burn|debris|wear|damage|odor_indicator|other",
+      "location": "where (e.g. 'driver seat cushion', 'rear floor mat', 'headliner')",
+      "severity": "minor|moderate|severe",
+      "description": "1 sentence"
+    }
+  ],
+  "overall_condition": "excellent|good|fair|poor",
+  "items_visible": ["array of notable personal items left in vehicle, or empty"],
+  "summary": "one short sentence"
+}
+
+Only flag what is clearly visible. Empty arrays are fine.`;
+
+function safeParseJson(text) {
+  if (!text) return null;
+  // strip code fences if any leaked
+  let t = text.trim();
+  t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  // Try direct parse
+  try { return JSON.parse(t); } catch {}
+  // Try to find the largest JSON object in the string
+  const m = t.match(/\{[\s\S]*\}/);
+  if (m) {
+    try { return JSON.parse(m[0]); } catch {}
+  }
+  return null;
+}
+
+// ============================================================
+// MAIN PIPELINE
+// ============================================================
+function setStatus(stepId, statusClass) {
+  const el = document.querySelector(`#status-list li[data-step="${stepId}"]`);
+  if (!el) return;
+  el.classList.remove('pending', 'active', 'done');
+  el.classList.add(statusClass);
+}
+
+async function submitInspection() {
+  stopCamera();
+  show('processing');
+  // Reset statuses
+  document.querySelectorAll('#status-list li').forEach(li => {
+    li.classList.remove('active', 'done');
+    li.classList.add('pending');
+  });
+
+  try {
+    setStatus('frames', 'active');
+    const extFrames = await extractFrames(state.exteriorBlob, 5);
+    const intFrames = await extractFrames(state.interiorBlob, 4);
+    state.exteriorFrames = extFrames;
+    state.interiorFrames = intFrames;
+    setStatus('frames', 'done');
+
+    // Exterior analysis (covers damage + plate together to save calls)
+    setStatus('exterior', 'active');
+    const extRaw = await analyzeWithClaude(extFrames, EXTERIOR_PROMPT);
+    setStatus('exterior', 'done');
+
+    setStatus('plate', 'active');
+    // Plate is part of exterior analysis already; just show progress
+    await new Promise(r => setTimeout(r, 350));
+    setStatus('plate', 'done');
+
+    setStatus('interior', 'active');
+    const intRaw = await analyzeWithClaude(intFrames, INTERIOR_PROMPT);
+    setStatus('interior', 'done');
+
+    const exteriorAnalysis = safeParseJson(extRaw) || { _raw: extRaw };
+    const interiorAnalysis = safeParseJson(intRaw) || { _raw: intRaw };
+
+    state.analysis = {
+      exterior: exteriorAnalysis,
+      interior: interiorAnalysis,
+      exteriorRaw: extRaw,
+      interiorRaw: intRaw,
+    };
+
+    setStatus('pdf', 'active');
+    const pdfBlob = await buildPdf();
+    state.pdfBlob = pdfBlob;
+    setStatus('pdf', 'done');
+
+    setStatus('save', 'active');
+    const saveResult = await saveToFolder(pdfBlob);
+    setStatus('save', 'done');
+
+    renderReport(saveResult);
+    show('report');
+  } catch (e) {
+    console.error(e);
+    alert('Something went wrong during analysis:\n\n' + e.message + '\n\nYou can try again or check the browser console for details.');
+    show('interior');
+  }
+}
+
+// ============================================================
+// PDF GENERATION
+// ============================================================
+async function buildPdf() {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  const W = doc.internal.pageSize.getWidth();
+  const H = doc.internal.pageSize.getHeight();
+  const M = 40;
+  const now = new Date();
+  const dateStr = now.toLocaleDateString();
+  const timeStr = now.toLocaleTimeString();
+  const reportId = 'HCW-' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0') + '-' + String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + String(now.getSeconds()).padStart(2,'0');
+
+  // ---- HEADER BANNER ----
+  doc.setFillColor(10, 10, 10);
+  doc.rect(0, 0, W, 90, 'F');
+  doc.setFillColor(225, 6, 0);
+  doc.rect(0, 90, W, 6, 'F');
+  doc.setFillColor(255, 212, 0);
+  doc.rect(0, 96, W, 3, 'F');
+
+  doc.setTextColor(255, 212, 0);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(26);
+  doc.text('HOLLYWOOD CAR WASH', W/2, 42, { align: 'center' });
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  doc.text('★  VEHICLE INSPECTION REPORT  ★', W/2, 60, { align: 'center' });
+  doc.setTextColor(225, 6, 0);
+  doc.setFontSize(9);
+  doc.text('Report ID: ' + reportId, W/2, 78, { align: 'center' });
+
+  let y = 130;
+  doc.setTextColor(20, 20, 20);
+
+  // ---- INSPECTION META BLOCK ----
+  doc.setFillColor(245, 245, 245);
+  doc.rect(M, y, W - 2*M, 110, 'F');
+  doc.setDrawColor(255, 212, 0);
+  doc.setLineWidth(2);
+  doc.line(M, y, M, y + 110);
+
+  doc.setFontSize(9);
+  doc.setTextColor(120, 120, 120);
+  doc.setFont('helvetica', 'bold');
+  const ext = state.analysis.exterior || {};
+  const plate = ext.license_plate || {};
+  const vehicle = ext.vehicle || {};
+  const meta = [
+    ['DATE',         dateStr + '   ' + timeStr],
+    ['TECHNICIAN',   state.tech || '—'],
+    ['CUSTOMER',     state.customer || '—'],
+    ['BAY / STALL',  state.bay || '—'],
+    ['SERVICE',      state.serviceType || '—'],
+    ['VEHICLE',      [state.color || vehicle.color, state.make || vehicle.make_model].filter(Boolean).join(' ') || '—'],
+    ['PLATE',        (plate.number ? plate.number + (plate.state ? ' (' + plate.state + ')' : '') : 'NOT READ')
+                     + (plate.confidence ? '  [conf: ' + plate.confidence + ']' : '')],
+  ];
+  let my = y + 18;
+  meta.forEach(([k, v]) => {
+    doc.setTextColor(120, 120, 120);
+    doc.setFontSize(8);
+    doc.text(k, M + 12, my);
+    doc.setTextColor(10, 10, 10);
+    doc.setFontSize(10);
+    doc.text(String(v).slice(0, 80), M + 100, my);
+    my += 13;
+  });
+
+  y += 130;
+
+  // ---- EXTERIOR FINDINGS ----
+  doc.setFillColor(10, 10, 10);
+  doc.rect(M, y, W - 2*M, 22, 'F');
+  doc.setTextColor(255, 212, 0);
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('EXTERIOR FINDINGS', M + 10, y + 15);
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(9);
+  doc.text('Condition: ' + (ext.overall_condition || '—').toUpperCase(), W - M - 10, y + 15, { align: 'right' });
+  y += 32;
+
+  doc.setTextColor(20, 20, 20);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'italic');
+  if (ext.summary) {
+    const lines = doc.splitTextToSize(ext.summary, W - 2*M);
+    doc.text(lines, M, y);
+    y += lines.length * 13 + 6;
+  }
+  doc.setFont('helvetica', 'normal');
+
+  const damage = (ext.damage || []);
+  if (damage.length === 0) {
+    doc.setTextColor(20, 120, 20);
+    doc.setFontSize(11);
+    doc.text('✓  No visible exterior damage detected.', M, y);
+    y += 20;
+  } else {
+    damage.forEach((d, i) => {
+      if (y > H - 100) { doc.addPage(); y = M; }
+      const sevColor = d.severity === 'severe' ? [225, 6, 0]
+                     : d.severity === 'moderate' ? [220, 140, 0]
+                     : [180, 160, 0];
+      doc.setFillColor(...sevColor);
+      doc.rect(M, y - 8, 4, 30, 'F');
+      doc.setTextColor(...sevColor);
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`${(d.type || 'OTHER').toUpperCase()}  ·  ${(d.severity || '').toUpperCase()}`, M + 10, y);
+      doc.setTextColor(20, 20, 20);
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.text('Location: ' + (d.location || '—'), M + 10, y + 12);
+      const descLines = doc.splitTextToSize(d.description || '', W - 2*M - 10);
+      doc.text(descLines, M + 10, y + 24);
+      y += 30 + descLines.length * 11;
+    });
+  }
+
+  y += 10;
+  if (y > H - 200) { doc.addPage(); y = M; }
+
+  // ---- INTERIOR FINDINGS ----
+  doc.setFillColor(10, 10, 10);
+  doc.rect(M, y, W - 2*M, 22, 'F');
+  doc.setTextColor(255, 212, 0);
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('INTERIOR FINDINGS', M + 10, y + 15);
+  const intA = state.analysis.interior || {};
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(9);
+  doc.text('Condition: ' + (intA.overall_condition || '—').toUpperCase(), W - M - 10, y + 15, { align: 'right' });
+  y += 32;
+
+  doc.setTextColor(20, 20, 20);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'italic');
+  if (intA.summary) {
+    const lines = doc.splitTextToSize(intA.summary, W - 2*M);
+    doc.text(lines, M, y);
+    y += lines.length * 13 + 6;
+  }
+  doc.setFont('helvetica', 'normal');
+
+  const issues = intA.issues || [];
+  if (issues.length === 0) {
+    doc.setTextColor(20, 120, 20);
+    doc.setFontSize(11);
+    doc.text('✓  No interior issues flagged.', M, y);
+    y += 20;
+  } else {
+    issues.forEach(d => {
+      if (y > H - 80) { doc.addPage(); y = M; }
+      const sevColor = d.severity === 'severe' ? [225, 6, 0]
+                     : d.severity === 'moderate' ? [220, 140, 0]
+                     : [180, 160, 0];
+      doc.setFillColor(...sevColor);
+      doc.rect(M, y - 8, 4, 30, 'F');
+      doc.setTextColor(...sevColor);
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`${(d.type || 'OTHER').toUpperCase()}  ·  ${(d.severity || '').toUpperCase()}`, M + 10, y);
+      doc.setTextColor(20, 20, 20);
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.text('Location: ' + (d.location || '—'), M + 10, y + 12);
+      const descLines = doc.splitTextToSize(d.description || '', W - 2*M - 10);
+      doc.text(descLines, M + 10, y + 24);
+      y += 30 + descLines.length * 11;
+    });
+  }
+
+  if ((intA.items_visible || []).length) {
+    if (y > H - 80) { doc.addPage(); y = M; }
+    y += 8;
+    doc.setTextColor(120, 120, 120);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.text('ITEMS VISIBLE IN VEHICLE:', M, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(20, 20, 20);
+    const items = intA.items_visible.join(', ');
+    const lines = doc.splitTextToSize(items, W - 2*M);
+    doc.text(lines, M, y + 12);
+    y += 14 + lines.length * 11;
+  }
+
+  // ---- FRAME APPENDIX ----
+  doc.addPage();
+  doc.setFillColor(10, 10, 10);
+  doc.rect(0, 0, W, 50, 'F');
+  doc.setTextColor(255, 212, 0);
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.text('SAMPLED FRAMES — EXTERIOR', M, 32);
+
+  let fy = 70;
+  const frameW = (W - 2*M - 12) / 2;
+  const frameH = frameW * 9/16;
+  state.exteriorFrames.forEach((f, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const fx = M + col * (frameW + 12);
+    const fyy = fy + row * (frameH + 12);
+    if (fyy + frameH > H - M) return;
+    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, frameH); } catch {}
+    doc.setDrawColor(255, 212, 0);
+    doc.setLineWidth(0.5);
+    doc.rect(fx, fyy, frameW, frameH);
+  });
+
+  doc.addPage();
+  doc.setFillColor(10, 10, 10);
+  doc.rect(0, 0, W, 50, 'F');
+  doc.setTextColor(255, 212, 0);
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.text('SAMPLED FRAMES — INTERIOR', M, 32);
+
+  fy = 70;
+  state.interiorFrames.forEach((f, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const fx = M + col * (frameW + 12);
+    const fyy = fy + row * (frameH + 12);
+    if (fyy + frameH > H - M) return;
+    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, frameH); } catch {}
+    doc.setDrawColor(255, 212, 0);
+    doc.setLineWidth(0.5);
+    doc.rect(fx, fyy, frameW, frameH);
+  });
+
+  // ---- FOOTER on every page ----
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let p = 1; p <= pageCount; p++) {
+    doc.setPage(p);
+    doc.setDrawColor(225, 6, 0);
+    doc.setLineWidth(1);
+    doc.line(M, H - 30, W - M, H - 30);
+    doc.setTextColor(120, 120, 120);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.text('Hollywood Car Wash · Inspection System', M, H - 18);
+    doc.text('Page ' + p + ' of ' + pageCount, W - M, H - 18, { align: 'right' });
+    doc.text(reportId, W/2, H - 18, { align: 'center' });
+  }
+
+  state.reportName = reportId;
+  return doc.output('blob');
+}
+
+// ============================================================
+// SAVE TO FOLDER
+// ============================================================
+async function saveToServer(pdfBlob, baseName) {
+  try {
+    const fd = new FormData();
+    fd.append('reportId', baseName);
+    fd.append('metadata', JSON.stringify({
+      reportId: baseName,
+      tech: state.tech,
+      customer: state.customer,
+      bay: state.bay,
+      serviceType: state.serviceType,
+      vehicleColor: state.color,
+      vehicleMake: state.make,
+      analysis: state.analysis,
+      timestamp: new Date().toISOString(),
+    }));
+    fd.append('pdf', pdfBlob, baseName + '.pdf');
+    if (state.exteriorBlob) fd.append('exterior', state.exteriorBlob, baseName + '_exterior.webm');
+    if (state.interiorBlob) fd.append('interior', state.interiorBlob, baseName + '_interior.webm');
+    const r = await fetch('/api/save-report', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error('Server returned ' + r.status);
+    return await r.json();
+  } catch (e) {
+    console.warn('Server save failed:', e);
+    return { ok: false, error: e.message };
+  }
+}
+
+async function saveToFolder(pdfBlob) {
+  const baseName = state.reportName + (state.tech ? '_' + state.tech.replace(/\W+/g, '') : '');
+  const result = { saved: false, location: '', filenames: [], serverSave: null };
+
+  // Always try server save first (this is the main "drop folder" on Railway)
+  result.serverSave = await saveToServer(pdfBlob, baseName);
+
+  if (state.folderHandle) {
+    try {
+      // Try to verify permission still
+      const perm = await state.folderHandle.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') {
+        const req = await state.folderHandle.requestPermission({ mode: 'readwrite' });
+        if (req !== 'granted') throw new Error('Folder permission denied');
+      }
+      // Save PDF
+      const pdfHandle = await state.folderHandle.getFileHandle(baseName + '.pdf', { create: true });
+      const w = await pdfHandle.createWritable();
+      await w.write(pdfBlob); await w.close();
+      result.filenames.push(baseName + '.pdf');
+      // Save videos
+      if (state.exteriorBlob) {
+        const h = await state.folderHandle.getFileHandle(baseName + '_exterior.webm', { create: true });
+        const ww = await h.createWritable(); await ww.write(state.exteriorBlob); await ww.close();
+        result.filenames.push(baseName + '_exterior.webm');
+      }
+      if (state.interiorBlob) {
+        const h = await state.folderHandle.getFileHandle(baseName + '_interior.webm', { create: true });
+        const ww = await h.createWritable(); await ww.write(state.interiorBlob); await ww.close();
+        result.filenames.push(baseName + '_interior.webm');
+      }
+      result.saved = true;
+      result.location = state.folderHandle.name;
+      return result;
+    } catch (e) {
+      console.warn('Folder save failed, falling back to download:', e);
+    }
+  }
+
+  // Fallback: trigger downloads
+  triggerDownload(pdfBlob, baseName + '.pdf');
+  if (state.exteriorBlob) triggerDownload(state.exteriorBlob, baseName + '_exterior.webm');
+  if (state.interiorBlob) triggerDownload(state.interiorBlob, baseName + '_interior.webm');
+  result.saved = true;
+  result.location = 'Downloads folder';
+  result.filenames = [baseName + '.pdf', baseName + '_exterior.webm', baseName + '_interior.webm'];
+  return result;
+}
+
+function triggerDownload(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+function downloadReport() {
+  if (state.pdfBlob) triggerDownload(state.pdfBlob, state.reportName + '.pdf');
+}
+
+// ============================================================
+// REPORT RENDERING
+// ============================================================
+function renderReport(saveResult) {
+  const ext = state.analysis.exterior || {};
+  const intA = state.analysis.interior || {};
+  const plate = ext.license_plate || {};
+  const vehicle = ext.vehicle || {};
+
+  // Save result banner
+  const sr = document.getElementById('save-result');
+  let banner = '';
+  if (saveResult.serverSave && saveResult.serverSave.ok) {
+    banner += `<div class="info">☁️ <strong>Saved to server:</strong> ${escapeHtml(saveResult.serverSave.dir || saveResult.serverSave.reportId || '')}<br/>
+      <a href="/reports" target="_blank" style="color:var(--yellow);text-decoration:underline;">View all reports →</a></div>`;
+  } else if (saveResult.serverSave && !saveResult.serverSave.ok) {
+    banner += `<div class="alert">⚠️ Server save failed: ${escapeHtml(saveResult.serverSave.error || 'unknown error')}</div>`;
+  }
+  banner += saveResult.saved
+    ? `<div class="info">✓ <strong>Local copy saved to ${escapeHtml(saveResult.location)}</strong><br/>${saveResult.filenames.map(escapeHtml).join('<br/>')}</div>`
+    : `<div class="alert">⚠️ Local save failed. Use the download button below.</div>`;
+  sr.innerHTML = banner;
+
+  // Summary box
+  const summary = document.getElementById('report-summary');
+  summary.innerHTML = `
+    <div class="summary-row"><span class="summary-label">Report ID</span><span class="summary-val">${escapeHtml(state.reportName)}</span></div>
+    <div class="summary-row"><span class="summary-label">Technician</span><span class="summary-val">${escapeHtml(state.tech || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">Customer</span><span class="summary-val">${escapeHtml(state.customer || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">Vehicle</span><span class="summary-val">${escapeHtml([state.color || vehicle.color, state.make || vehicle.make_model].filter(Boolean).join(' ') || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">License Plate</span><span class="summary-val">${escapeHtml(plate.number ? plate.number + (plate.state ? ' / ' + plate.state : '') : 'NOT READ')}${plate.confidence ? ' <span style="color:#888;">(' + plate.confidence + ')</span>' : ''}</span></div>
+    <div class="summary-row"><span class="summary-label">Exterior</span><span class="summary-val">${escapeHtml((ext.overall_condition || '—').toUpperCase())}</span></div>
+    <div class="summary-row"><span class="summary-label">Interior</span><span class="summary-val">${escapeHtml((intA.overall_condition || '—').toUpperCase())}</span></div>
+  `;
+
+  // Exterior findings
+  const findExt = document.getElementById('findings-ext');
+  const damage = ext.damage || [];
+  if (damage.length === 0) {
+    findExt.innerHTML = `<div class="finding minor"><div class="finding-type">CLEAR</div>No visible exterior damage detected.</div>`;
+  } else {
+    findExt.innerHTML = damage.map(d => `
+      <div class="finding ${d.severity || 'minor'}">
+        <div class="finding-type">${escapeHtml((d.type || 'other').toUpperCase())} · ${escapeHtml((d.severity || '').toUpperCase())}</div>
+        <strong>${escapeHtml(d.location || 'Unknown location')}</strong> — ${escapeHtml(d.description || '')}
+      </div>`).join('');
+  }
+
+  // Interior findings
+  const findInt = document.getElementById('findings-int');
+  const issues = intA.issues || [];
+  if (issues.length === 0) {
+    findInt.innerHTML = `<div class="finding minor"><div class="finding-type">CLEAR</div>No interior issues flagged.</div>`;
+  } else {
+    findInt.innerHTML = issues.map(d => `
+      <div class="finding ${d.severity || 'minor'}">
+        <div class="finding-type">${escapeHtml((d.type || 'other').toUpperCase())} · ${escapeHtml((d.severity || '').toUpperCase())}</div>
+        <strong>${escapeHtml(d.location || 'Unknown location')}</strong> — ${escapeHtml(d.description || '')}
+      </div>`).join('');
+  }
+
+  // Frames preview
+  const fp = document.getElementById('frames-preview');
+  fp.innerHTML = '';
+  [...state.exteriorFrames, ...state.interiorFrames].forEach(src => {
+    const im = document.createElement('img');
+    im.src = src;
+    fp.appendChild(im);
+  });
+
+  // Raw text (debug)
+  document.getElementById('raw-text').textContent =
+    '=== EXTERIOR ===\n' + (state.analysis.exteriorRaw || '') +
+    '\n\n=== INTERIOR ===\n' + (state.analysis.interiorRaw || '');
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+// ============================================================
+// RESET
+// ============================================================
+function resetApp() {
+  state.tech = state.customer = state.make = state.color = state.bay = state.serviceType = '';
+  state.exteriorBlob = state.interiorBlob = null;
+  state.exteriorFrames = []; state.interiorFrames = [];
+  state.analysis = null; state.pdfBlob = null; state.reportName = '';
+  document.getElementById('tech-name').value = '';
+  document.getElementById('customer-name').value = '';
+  document.getElementById('vehicle-make').value = '';
+  document.getElementById('vehicle-color').value = '';
+  document.getElementById('bay-num').value = '';
+  document.getElementById('ext-next-btn').disabled = true;
+  document.getElementById('int-send-btn').disabled = true;
+  document.getElementById('ext-rec-btn').disabled = true;
+  document.getElementById('int-rec-btn').disabled = true;
+  document.getElementById('status-ext').textContent = 'Camera not started.';
+  document.getElementById('status-int').textContent = 'Camera not started.';
+  document.getElementById('status-ext').classList.remove('done');
+  document.getElementById('status-int').classList.remove('done');
+  document.getElementById('timer-ext').textContent = '00:00';
+  document.getElementById('timer-int').textContent = '00:00';
+  document.getElementById('ext-start-btn').textContent = '📷 Start Camera';
+  document.getElementById('int-start-btn').textContent = '📷 Start Camera';
+  document.getElementById('ext-rec-btn').textContent = '● Record';
+  document.getElementById('int-rec-btn').textContent = '● Record';
+  show('home');
+}
+
+// Cleanup on unload
+window.addEventListener('beforeunload', stopCamera);
+</script>
+</body>
+</html>

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Reports — Hollywood Car Wash</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --yellow: #FFD400; --red: #E10600; --black: #0A0A0A;
+    --ink: #141414; --panel: #1A1A1A; --line: #2A2A2A;
+    --muted: #888; --white: #F5F5F5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Manrope', sans-serif;
+    background: var(--black);
+    color: var(--white);
+    min-height: 100vh;
+    background-image:
+      radial-gradient(circle at 20% 0%, rgba(225,6,0,0.08) 0%, transparent 50%),
+      radial-gradient(circle at 80% 100%, rgba(255,212,0,0.06) 0%, transparent 50%);
+  }
+  .app { max-width: 1100px; margin: 0 auto; padding: 24px 20px 48px; }
+  .marquee {
+    border: 3px solid var(--yellow);
+    padding: 18px 22px;
+    margin-bottom: 28px;
+    box-shadow: 0 0 0 6px var(--black), 0 0 0 8px var(--red), 6px 6px 0 8px var(--yellow);
+    border-radius: 4px;
+  }
+  .brand {
+    text-align: center;
+    font-family: 'Bungee', cursive;
+    color: var(--yellow);
+    font-size: clamp(20px, 4vw, 32px);
+    text-shadow: 3px 3px 0 var(--red);
+    letter-spacing: 0.04em;
+  }
+  .sub {
+    text-align: center;
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.3em;
+    margin-top: 6px;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+  .toolbar {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 20px; gap: 12px; flex-wrap: wrap;
+  }
+  .count {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  .count strong { color: var(--yellow); font-size: 18px; }
+  .btn {
+    font-family: 'Bungee', cursive;
+    padding: 10px 18px;
+    font-size: 13px;
+    border: 2px solid var(--yellow);
+    background: transparent;
+    color: var(--yellow);
+    cursor: pointer;
+    border-radius: 4px;
+    text-decoration: none;
+    display: inline-block;
+    letter-spacing: 0.05em;
+  }
+  .btn:hover { background: var(--yellow); color: var(--black); }
+  .empty {
+    background: var(--panel);
+    border: 1px dashed var(--line);
+    padding: 50px 20px;
+    text-align: center;
+    border-radius: 6px;
+  }
+  .empty h3 { font-family: 'Bungee', cursive; color: var(--yellow); margin-bottom: 10px; }
+  .empty p { color: var(--muted); font-size: 14px; }
+  .reports {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+  .report-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 18px;
+    border-left: 4px solid var(--yellow);
+    transition: transform 0.15s, border-color 0.15s;
+  }
+  .report-card:hover { transform: translateY(-2px); border-left-color: var(--red); }
+  .report-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--yellow);
+    letter-spacing: 0.1em;
+    margin-bottom: 4px;
+  }
+  .report-when {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .report-meta {
+    font-size: 13px;
+    line-height: 1.6;
+    margin-bottom: 14px;
+  }
+  .report-meta .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--line);
+  }
+  .report-meta .row:last-child { border-bottom: 0; }
+  .report-meta .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
+  .report-meta .val { color: var(--white); font-weight: 600; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    background: var(--red);
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    border-radius: 2px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .badge.ok { background: var(--yellow); color: var(--black); }
+  .files {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding-top: 12px; border-top: 1px solid var(--line);
+  }
+  .file-link {
+    background: var(--black);
+    color: var(--yellow);
+    padding: 6px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    border-radius: 3px;
+    text-decoration: none;
+    border: 1px solid var(--line);
+  }
+  .file-link:hover { border-color: var(--yellow); }
+  .file-link.pdf { background: var(--red); color: var(--white); border-color: var(--red); }
+  .loading {
+    text-align: center;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    padding: 40px;
+  }
+  .filmstrip {
+    height: 18px;
+    border-top: 2px solid var(--yellow);
+    border-bottom: 2px solid var(--yellow);
+    margin: -8px 0 24px;
+    background-image:
+      linear-gradient(90deg, var(--black) 0, var(--black) 6px, transparent 6px, transparent 14px),
+      linear-gradient(var(--ink) 0, var(--ink) 100%);
+    background-size: 14px 100%;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="marquee">
+    <div class="brand">★ INSPECTION ARCHIVE ★</div>
+    <div class="sub">Hollywood Car Wash · Past Reports</div>
+  </div>
+  <div class="filmstrip"></div>
+
+  <div class="toolbar">
+    <div class="count" id="count">Loading...</div>
+    <a href="/" class="btn">← New Inspection</a>
+  </div>
+
+  <div id="container">
+    <div class="loading">Loading reports...</div>
+  </div>
+</div>
+
+<script>
+async function load() {
+  const container = document.getElementById('container');
+  const countEl = document.getElementById('count');
+  try {
+    const r = await fetch('/api/reports');
+    const data = await r.json();
+    countEl.innerHTML = '<strong>' + data.count + '</strong> reports on file';
+
+    if (!data.reports || data.reports.length === 0) {
+      container.innerHTML = `
+        <div class="empty">
+          <h3>NO REPORTS YET</h3>
+          <p>Reports saved from the inspection app will show up here.</p>
+        </div>`;
+      return;
+    }
+
+    container.innerHTML = '<div class="reports">' + data.reports.map(r => {
+      const meta = r.metadata || {};
+      const ext = (meta.analysis && meta.analysis.exterior) || {};
+      const intA = (meta.analysis && meta.analysis.interior) || {};
+      const plate = ext.license_plate || {};
+      const damage = (ext.damage || []).length;
+      const issues = (intA.issues || []).length;
+      const totalFlags = damage + issues;
+      const date = new Date(r.createdAt);
+
+      return `
+        <div class="report-card">
+          <div class="report-id">${escape(r.id)}</div>
+          <div class="report-when">${date.toLocaleString()}</div>
+          <div class="report-meta">
+            <div class="row"><span class="label">Tech</span><span class="val">${escape(meta.tech || '—')}</span></div>
+            <div class="row"><span class="label">Customer</span><span class="val">${escape(meta.customer || '—')}</span></div>
+            <div class="row"><span class="label">Bay</span><span class="val">${escape(meta.bay || '—')}</span></div>
+            <div class="row"><span class="label">Plate</span><span class="val">${escape(plate.number || 'NOT READ')}${plate.state ? ' / ' + escape(plate.state) : ''}</span></div>
+            <div class="row"><span class="label">Findings</span><span class="val">
+              ${totalFlags === 0
+                ? '<span class="badge ok">CLEAR</span>'
+                : '<span class="badge">' + totalFlags + ' flagged</span>'}
+            </span></div>
+          </div>
+          <div class="files">
+            ${r.files.map(f => {
+              const isPdf = f.endsWith('.pdf');
+              return `<a class="file-link ${isPdf ? 'pdf' : ''}" href="/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}" target="_blank">${isPdf ? '📄 ' : '🎬 '}${escape(f.split('_').pop())}</a>`;
+            }).join('')}
+          </div>
+        </div>`;
+    }).join('') + '</div>';
+  } catch (e) {
+    container.innerHTML = `<div class="empty"><h3>ERROR</h3><p>${escape(e.message)}</p></div>`;
+  }
+}
+
+function escape(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+load();
+</script>
+</body>
+</html>
