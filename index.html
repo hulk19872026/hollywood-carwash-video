@@ -1497,12 +1497,25 @@ async function uploadJob(job) {
       const u = uploads[kind];
       const blob = job.files[kind];
       if (!u || !blob) continue;
-      const put = await fetch(u.url, {
-        method: 'PUT',
-        headers: { 'Content-Type': u.contentType },
-        body: blob,
-      });
-      if (!put.ok) throw new Error(`PUT ${kind} returned ${put.status}`);
+      // Safari uses blob.type for the request Content-Type and ignores
+      // overrides if blob.type carries ;codecs=... So re-wrap with the
+      // exact content type the URL was signed with.
+      const upBlob = blob.type === u.contentType ? blob : new Blob([blob], { type: u.contentType });
+      let put;
+      try {
+        put = await fetch(u.url, {
+          method: 'PUT',
+          headers: { 'Content-Type': u.contentType },
+          body: upBlob,
+        });
+      } catch (e) {
+        throw new Error(`PUT ${kind} network error: ${e.message || e}`);
+      }
+      if (!put.ok) {
+        let detail = '';
+        try { detail = (await put.text()).slice(0, 200); } catch {}
+        throw new Error(`PUT ${kind} returned ${put.status}${detail ? ' — ' + detail : ''}`);
+      }
       uploadedKeys[kind] = u.key;
       await qPut({ ...job, uploadedKeys, status: 'uploading' });
       job.uploadedKeys = uploadedKeys;
