@@ -489,7 +489,7 @@
 </style>
 </head>
 <body>
-<div id="q-badge" style="display:none;position:fixed;top:12px;right:12px;z-index:9999;padding:8px 14px;border-radius:8px;background:#102a3a;color:#fff;font:600 13px/1.2 Manrope,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);align-items:center;gap:8px;cursor:default;"></div>
+<div id="q-badge" onclick="showQueueDetails()" style="display:none;position:fixed;top:12px;right:12px;z-index:9999;padding:8px 14px;border-radius:8px;background:#102a3a;color:#fff;font:600 13px/1.2 Manrope,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);align-items:center;gap:8px;cursor:pointer;"></div>
 <div class="app">
 
   <!-- HEADER -->
@@ -1537,6 +1537,29 @@ async function updateQueueBadge() {
   if (failed)    label += ` · ${failed} failed`;
   el.textContent = label;
   el.style.background = failed ? '#5a1010' : (uploading ? '#3a3a10' : '#102a3a');
+}
+
+async function showQueueDetails() {
+  const jobs = await qAll().catch(() => []);
+  if (!jobs.length) return;
+  const lines = jobs.map(j => {
+    const kinds = Object.keys(j.files || {}).join(',');
+    const mimes = j.mimes ? Object.entries(j.mimes).map(([k,v]) => `${k}=${v}`).join(' ') : '';
+    return `• ${j.reportId}\n  status: ${j.status}\n  files: ${kinds}\n  mimes: ${mimes}\n  attempts: ${j.attempts || 0}\n  error: ${j.lastError || '(none)'}`;
+  }).join('\n\n');
+  const failedCount = jobs.filter(j => j.status === 'failed').length;
+  const action = failedCount
+    ? '\n\nTap OK to retry failed uploads.\nTap Cancel to remove them.'
+    : '\n\nTap OK to force-retry now.';
+  if (confirm(`Upload queue (${jobs.length}):\n\n${lines}${action}`)) {
+    for (const j of jobs) {
+      if (j.status === 'failed') await qPut({ ...j, status: 'pending', lastError: null });
+    }
+    processQueue();
+  } else if (failedCount) {
+    for (const j of jobs) if (j.status === 'failed') await qDel(j.reportId);
+    updateQueueBadge();
+  }
 }
 
 window.addEventListener('online', processQueue);
