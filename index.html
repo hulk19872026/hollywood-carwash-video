@@ -489,6 +489,7 @@
 </style>
 </head>
 <body>
+<div id="q-badge" style="display:none;position:fixed;top:12px;right:12px;z-index:9999;padding:8px 14px;border-radius:8px;background:#102a3a;color:#fff;font:600 13px/1.2 Manrope,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);align-items:center;gap:8px;cursor:default;"></div>
 <div class="app">
 
   <!-- HEADER -->
@@ -1333,39 +1334,168 @@ async function buildPdf() {
 // ============================================================
 // SAVE TO FOLDER
 // ============================================================
-async function saveToServer(pdfBlob, baseName) {
+// ============================================================
+// UPLOAD QUEUE — IndexedDB-backed, survives tab close
+// ============================================================
+const Q_DB = 'carwash-uploads';
+const Q_STORE = 'jobs';
+
+function qOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(Q_DB, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(Q_STORE, { keyPath: 'reportId' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function qTx(mode) { return qOpen().then(db => db.transaction(Q_STORE, mode).objectStore(Q_STORE)); }
+async function qPut(job) { const s = await qTx('readwrite'); return new Promise((r,e)=>{const q=s.put(job);q.onsuccess=()=>r();q.onerror=()=>e(q.error);}); }
+async function qGet(id)  { const s = await qTx('readonly');  return new Promise((r,e)=>{const q=s.get(id);q.onsuccess=()=>r(q.result);q.onerror=()=>e(q.error);}); }
+async function qAll()    { const s = await qTx('readonly');  return new Promise((r,e)=>{const q=s.getAll();q.onsuccess=()=>r(q.result||[]);q.onerror=()=>e(q.error);}); }
+async function qDel(id)  { const s = await qTx('readwrite'); return new Promise((r,e)=>{const q=s.delete(id);q.onsuccess=()=>r();q.onerror=()=>e(q.error);}); }
+
+let _qProcessing = false;
+
+async function queueForUpload({ reportId, metadata, pdfBlob, exteriorBlob, interiorBlob }) {
+  const job = {
+    reportId,
+    metadata,
+    files: {
+      ...(pdfBlob      ? { pdf: pdfBlob }           : {}),
+      ...(exteriorBlob ? { exterior: exteriorBlob } : {}),
+      ...(interiorBlob ? { interior: interiorBlob } : {}),
+    },
+    uploadedKeys: {},
+    status: 'pending',
+    attempts: 0,
+    lastError: null,
+    queuedAt: new Date().toISOString(),
+  };
+  await qPut(job);
+  updateQueueBadge();
+  processQueue();
+  return job;
+}
+
+async function processQueue() {
+  if (_qProcessing) return;
+  if (!navigator.onLine) { updateQueueBadge(); return; }
+  _qProcessing = true;
   try {
-    const fd = new FormData();
-    fd.append('reportId', baseName);
-    fd.append('metadata', JSON.stringify({
-      reportId: baseName,
-      tech: state.tech,
-      customer: state.customer,
-      bay: state.bay,
-      serviceType: state.serviceType,
-      vehicleColor: state.color,
-      vehicleMake: state.make,
-      analysis: state.analysis,
-      timestamp: new Date().toISOString(),
-    }));
-    fd.append('pdf', pdfBlob, baseName + '.pdf');
-    if (state.exteriorBlob) fd.append('exterior', state.exteriorBlob, baseName + '_exterior.webm');
-    if (state.interiorBlob) fd.append('interior', state.interiorBlob, baseName + '_interior.webm');
-    const r = await fetch('/api/save-report', { method: 'POST', body: fd });
-    if (!r.ok) throw new Error('Server returned ' + r.status);
-    return await r.json();
-  } catch (e) {
-    console.warn('Server save failed:', e);
-    return { ok: false, error: e.message };
+    const jobs = await qAll();
+    for (const job of jobs) {
+      try {
+        await uploadJob(job);
+      } catch (e) {
+        console.warn('Upload failed for', job.reportId, e);
+        await qPut({ ...job, status: 'failed', lastError: String(e.message || e), attempts: (job.attempts || 0) + 1 });
+      }
+      updateQueueBadge();
+    }
+  } finally {
+    _qProcessing = false;
+    updateQueueBadge();
   }
+}
+
+async function uploadJob(job) {
+  await qPut({ ...job, status: 'uploading' });
+  const kinds = Object.keys(job.files).filter(k => !job.uploadedKeys?.[k]);
+
+  if (kinds.length) {
+    const r = await fetch('/api/presign-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reportId: job.reportId, files: kinds }),
+    });
+    if (!r.ok) throw new Error('presign-upload ' + r.status);
+    const { uploads } = await r.json();
+
+    const uploadedKeys = { ...(job.uploadedKeys || {}) };
+    for (const kind of kinds) {
+      const u = uploads[kind];
+      const blob = job.files[kind];
+      if (!u || !blob) continue;
+      const put = await fetch(u.url, {
+        method: 'PUT',
+        headers: { 'Content-Type': u.contentType },
+        body: blob,
+      });
+      if (!put.ok) throw new Error(`PUT ${kind} returned ${put.status}`);
+      uploadedKeys[kind] = u.key;
+      await qPut({ ...job, uploadedKeys, status: 'uploading' });
+      job.uploadedKeys = uploadedKeys;
+    }
+  }
+
+  const fin = await fetch('/api/finalize-report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      reportId: job.reportId,
+      metadata: job.metadata,
+      uploadedKeys: job.uploadedKeys,
+    }),
+  });
+  if (!fin.ok) throw new Error('finalize-report ' + fin.status);
+
+  await qDel(job.reportId);
+}
+
+async function updateQueueBadge() {
+  const el = document.getElementById('q-badge');
+  if (!el) return;
+  const jobs = await qAll().catch(() => []);
+  if (!jobs.length) { el.style.display = 'none'; return; }
+  const failed    = jobs.filter(j => j.status === 'failed').length;
+  const uploading = jobs.filter(j => j.status === 'uploading').length;
+  const pending   = jobs.length - uploading - failed;
+  el.style.display = 'flex';
+  let label = `📤 ${jobs.length} upload${jobs.length === 1 ? '' : 's'}`;
+  if (uploading) label += ` · ${uploading} sending`;
+  if (failed)    label += ` · ${failed} failed`;
+  el.textContent = label;
+  el.style.background = failed ? '#5a1010' : (uploading ? '#3a3a10' : '#102a3a');
+}
+
+window.addEventListener('online', processQueue);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) processQueue(); });
+window.addEventListener('load', () => { processQueue(); setInterval(processQueue, 30000); });
+
+async function saveToServer() {
+  // Legacy shim — uploads now happen via the background queue.
+  return { ok: true, queued: true };
 }
 
 async function saveToFolder(pdfBlob) {
   const baseName = state.reportName + (state.tech ? '_' + state.tech.replace(/\W+/g, '') : '');
   const result = { saved: false, location: '', filenames: [], serverSave: null };
 
-  // Always try server save first (this is the main "drop folder" on Railway)
-  result.serverSave = await saveToServer(pdfBlob, baseName);
+  // Enqueue for background upload to R2 (returns immediately).
+  try {
+    await queueForUpload({
+      reportId: baseName,
+      metadata: {
+        reportId: baseName,
+        tech: state.tech,
+        customer: state.customer,
+        bay: state.bay,
+        serviceType: state.serviceType,
+        vehicleColor: state.color,
+        vehicleMake: state.make,
+        analysis: state.analysis,
+        timestamp: new Date().toISOString(),
+      },
+      pdfBlob,
+      exteriorBlob: state.exteriorBlob,
+      interiorBlob: state.interiorBlob,
+    });
+    result.serverSave = { ok: true, queued: true, reportId: baseName };
+  } catch (e) {
+    result.serverSave = { ok: false, error: e.message };
+  }
 
   if (state.folderHandle) {
     try {
@@ -1434,11 +1564,12 @@ function renderReport(saveResult) {
   // Save result banner
   const sr = document.getElementById('save-result');
   let banner = '';
-  if (saveResult.serverSave && saveResult.serverSave.ok) {
-    banner += `<div class="info">☁️ <strong>Saved to server:</strong> ${escapeHtml(saveResult.serverSave.dir || saveResult.serverSave.reportId || '')}<br/>
+  if (saveResult.serverSave && saveResult.serverSave.queued) {
+    banner += `<div class="info">📤 <strong>Queued for cloud upload:</strong> ${escapeHtml(saveResult.serverSave.reportId || '')}<br/>
+      Uploading in background — safe to start the next inspection.<br/>
       <a href="/reports" target="_blank" style="color:var(--yellow);text-decoration:underline;">View all reports →</a></div>`;
   } else if (saveResult.serverSave && !saveResult.serverSave.ok) {
-    banner += `<div class="alert">⚠️ Server save failed: ${escapeHtml(saveResult.serverSave.error || 'unknown error')}</div>`;
+    banner += `<div class="alert">⚠️ Could not queue upload: ${escapeHtml(saveResult.serverSave.error || 'unknown error')}</div>`;
   }
   banner += saveResult.saved
     ? `<div class="info">✓ <strong>Local copy saved to ${escapeHtml(saveResult.location)}</strong><br/>${saveResult.filenames.map(escapeHtml).join('<br/>')}</div>`

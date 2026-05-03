@@ -1,30 +1,57 @@
 // ============================================================
 //  Hollywood Car Wash — Inspection Server
 //  Serves the inspection app, proxies AI calls to Anthropic,
-//  and saves PDF + video reports to disk.
+//  and brokers direct-to-R2 uploads via presigned URLs.
+//
+//  Required env vars on Railway:
+//    ANTHROPIC_API_KEY     - for /api/analyze
+//    R2_ACCOUNT_ID         - Cloudflare account ID
+//    R2_ACCESS_KEY_ID      - R2 access key
+//    R2_SECRET_ACCESS_KEY  - R2 secret
+//    R2_BUCKET             - R2 bucket name
+//  Optional:
+//    ANTHROPIC_MODEL, MAX_TOKENS, PORT
 // ============================================================
 import express from 'express';
-import multer from 'multer';
-import { promises as fs, mkdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import 'dotenv/config';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 const PORT       = process.env.PORT || 3000;
-const REPORT_DIR = process.env.REPORT_DIR || path.join(__dirname, 'reports');
 const API_KEY    = process.env.ANTHROPIC_API_KEY;
 const MODEL      = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514';
 const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || '1500', 10);
 
-if (!API_KEY) {
-  console.warn('⚠️  ANTHROPIC_API_KEY is not set. /api/analyze will fail until you set it.');
-}
+const R2_ACCOUNT_ID        = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID     = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET            = process.env.R2_BUCKET;
+const R2_READY = !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET);
 
-mkdirSync(REPORT_DIR, { recursive: true });
-console.log('★ Report directory:', REPORT_DIR);
+if (!API_KEY)  console.warn('⚠️  ANTHROPIC_API_KEY is not set. /api/analyze will fail.');
+if (!R2_READY) console.warn('⚠️  R2 env vars missing. Upload + reports endpoints will return 500.');
+
+let s3 = null;
+if (R2_READY) {
+  s3 = new S3Client({
+    region: 'auto',
+    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: R2_ACCESS_KEY_ID,
+      secretAccessKey: R2_SECRET_ACCESS_KEY,
+    },
+  });
+}
 
 const app = express();
 app.disable('x-powered-by');
@@ -36,40 +63,43 @@ app.use((req, _res, next) => {
   next();
 });
 
-// ============================================================
-//  GET / — serve the inspection app
-// ============================================================
-app.get('/', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 250 * 1024 * 1024 }, // 250MB per file
-});
-
 // ----- helpers -----
 function sanitize(s) {
-  return String(s || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || 'unnamed';
+  return String(s || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'unnamed';
 }
-function safeJoin(base, ...parts) {
-  const fp = path.join(base, ...parts);
-  const resolved = path.resolve(fp);
-  if (!resolved.startsWith(path.resolve(base))) {
-    throw new Error('Path traversal blocked');
+
+function requireR2(res) {
+  if (!R2_READY) {
+    res.status(500).json({ error: 'r2_not_configured', message: 'Server is missing R2 env vars' });
+    return false;
   }
-  return resolved;
+  return true;
+}
+
+const FILE_KIND = {
+  pdf:      { ext: '.pdf',           contentType: 'application/pdf' },
+  exterior: { ext: '_exterior.webm', contentType: 'video/webm' },
+  interior: { ext: '_interior.webm', contentType: 'video/webm' },
+};
+
+function r2KeyFor(reportId, kind) {
+  const meta = FILE_KIND[kind];
+  if (!meta) return null;
+  return `reports/${reportId}/${reportId}${meta.ext}`;
 }
 
 // ============================================================
-//  POST /api/analyze
-//  Proxies the inspection app's vision request to Anthropic.
+//  Static pages
+// ============================================================
+app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/reports', (_req, res) => res.sendFile(path.join(__dirname, 'reports.html')));
+
+// ============================================================
+//  POST /api/analyze — Anthropic vision proxy
 // ============================================================
 app.post('/api/analyze', async (req, res) => {
   if (!API_KEY) {
-    return res.status(500).json({
-      error: { type: 'config_error', message: 'Server is missing ANTHROPIC_API_KEY env var' }
-    });
+    return res.status(500).json({ error: { type: 'config_error', message: 'Server is missing ANTHROPIC_API_KEY env var' } });
   }
   if (!req.body || !Array.isArray(req.body.messages)) {
     return res.status(400).json({ error: { type: 'bad_request', message: 'messages array required' } });
@@ -97,134 +127,179 @@ app.post('/api/analyze', async (req, res) => {
 });
 
 // ============================================================
-//  POST /api/save-report
-//  Multipart upload: pdf + exterior video + interior video + metadata json
+//  POST /api/presign-upload
+//  Body: { reportId, files: ['pdf','exterior','interior'] }
+//  Returns presigned PUT URLs the client uploads to directly.
 // ============================================================
-app.post('/api/save-report',
-  upload.fields([
-    { name: 'pdf',      maxCount: 1 },
-    { name: 'exterior', maxCount: 1 },
-    { name: 'interior', maxCount: 1 },
-  ]),
-  async (req, res) => {
-    try {
-      const reportId = sanitize(req.body.reportId || ('REPORT-' + Date.now()));
-      const dir = safeJoin(REPORT_DIR, reportId);
-      await fs.mkdir(dir, { recursive: true });
-
-      const saved = [];
-      const fileMap = {
-        pdf:      reportId + '.pdf',
-        exterior: reportId + '_exterior.webm',
-        interior: reportId + '_interior.webm',
-      };
-      for (const [field, name] of Object.entries(fileMap)) {
-        const f = (req.files[field] || [])[0];
-        if (f) {
-          await fs.writeFile(safeJoin(dir, name), f.buffer);
-          saved.push(name);
-        }
-      }
-      if (req.body.metadata) {
-        try {
-          const parsed = JSON.parse(req.body.metadata);
-          await fs.writeFile(safeJoin(dir, 'metadata.json'), JSON.stringify(parsed, null, 2));
-          saved.push('metadata.json');
-        } catch {
-          await fs.writeFile(safeJoin(dir, 'metadata.txt'), String(req.body.metadata));
-          saved.push('metadata.txt');
-        }
-      }
-
-      console.log(`✓ Saved report ${reportId} (${saved.length} files)`);
-      res.json({ ok: true, reportId, dir: path.relative(__dirname, dir), saved });
-    } catch (e) {
-      console.error('Save failed:', e);
-      res.status(500).json({ ok: false, error: e.message });
+app.post('/api/presign-upload', async (req, res) => {
+  if (!requireR2(res)) return;
+  try {
+    const { reportId, files } = req.body || {};
+    if (!reportId || !Array.isArray(files) || !files.length) {
+      return res.status(400).json({ error: 'bad_request', message: 'reportId and files[] required' });
     }
+    const id = sanitize(reportId);
+    const uploads = {};
+    for (const kind of files) {
+      const meta = FILE_KIND[kind];
+      if (!meta) continue;
+      const key = r2KeyFor(id, kind);
+      const cmd = new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: key,
+        ContentType: meta.contentType,
+      });
+      const url = await getSignedUrl(s3, cmd, { expiresIn: 3600 });
+      uploads[kind] = { url, key, contentType: meta.contentType };
+    }
+    res.json({ reportId: id, uploads });
+  } catch (e) {
+    console.error('presign-upload failed:', e);
+    res.status(500).json({ error: 'presign_failed', message: e.message });
   }
-);
+});
 
 // ============================================================
-//  GET /api/reports — list saved inspections
+//  POST /api/finalize-report
+//  Body: { reportId, metadata, uploadedKeys }
+//  Writes metadata.json into the report folder in R2.
+// ============================================================
+app.post('/api/finalize-report', async (req, res) => {
+  if (!requireR2(res)) return;
+  try {
+    const { reportId, metadata, uploadedKeys } = req.body || {};
+    if (!reportId || !metadata) {
+      return res.status(400).json({ error: 'bad_request', message: 'reportId and metadata required' });
+    }
+    const id = sanitize(reportId);
+    const body = JSON.stringify({
+      ...metadata,
+      reportId: id,
+      uploadedKeys: uploadedKeys || {},
+      finalizedAt: new Date().toISOString(),
+    }, null, 2);
+    await s3.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: `reports/${id}/metadata.json`,
+      Body: body,
+      ContentType: 'application/json',
+    }));
+    console.log(`✓ Finalized report ${id}`);
+    res.json({ ok: true, reportId: id });
+  } catch (e) {
+    console.error('finalize-report failed:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ============================================================
+//  GET /api/reports — list saved inspections from R2
 // ============================================================
 app.get('/api/reports', async (_req, res) => {
+  if (!requireR2(res)) return;
   try {
-    const entries = await fs.readdir(REPORT_DIR, { withFileTypes: true });
+    const top = await s3.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET,
+      Prefix: 'reports/',
+      Delimiter: '/',
+    }));
+    const ids = (top.CommonPrefixes || [])
+      .map(p => p.Prefix.replace(/^reports\//, '').replace(/\/$/, ''))
+      .filter(Boolean);
+
     const reports = [];
-    for (const e of entries) {
-      if (!e.isDirectory()) continue;
-      const dir = safeJoin(REPORT_DIR, e.name);
-      const stat = await fs.stat(dir);
-      const files = await fs.readdir(dir);
+    for (const id of ids) {
       let metadata = null;
-      if (files.includes('metadata.json')) {
-        try {
-          metadata = JSON.parse(await fs.readFile(safeJoin(dir, 'metadata.json'), 'utf8'));
-        } catch {}
-      }
-      reports.push({
-        id: e.name,
-        createdAt: stat.mtime.toISOString(),
-        files,
-        metadata,
-      });
+      let createdAt = null;
+      try {
+        const got = await s3.send(new GetObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: `reports/${id}/metadata.json`,
+        }));
+        const text = await got.Body.transformToString('utf8');
+        metadata = JSON.parse(text);
+        createdAt = metadata.timestamp || metadata.finalizedAt || null;
+      } catch {}
+
+      let files = [];
+      try {
+        const inner = await s3.send(new ListObjectsV2Command({
+          Bucket: R2_BUCKET,
+          Prefix: `reports/${id}/`,
+        }));
+        files = (inner.Contents || [])
+          .map(c => c.Key.slice(`reports/${id}/`.length))
+          .filter(f => f && f !== 'metadata.json');
+        if (!createdAt) {
+          const newest = (inner.Contents || [])
+            .map(c => c.LastModified)
+            .filter(Boolean)
+            .sort((a, b) => b - a)[0];
+          if (newest) createdAt = new Date(newest).toISOString();
+        }
+      } catch {}
+
+      reports.push({ id, createdAt, files, metadata });
     }
-    reports.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+    reports.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     res.json({ reports, count: reports.length });
   } catch (e) {
+    console.error('list reports failed:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
 // ============================================================
-//  GET /api/reports/:id/:file — download a specific report file
+//  GET /api/reports/:id/:file
+//  Redirects to a short-lived presigned R2 GET URL.
 // ============================================================
 app.get('/api/reports/:id/:file', async (req, res) => {
+  if (!requireR2(res)) return;
   try {
     const id   = sanitize(req.params.id);
     const file = sanitize(req.params.file);
-    const fp   = safeJoin(REPORT_DIR, id, file);
-    res.sendFile(fp);
+    const url  = await getSignedUrl(s3, new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: `reports/${id}/${file}`,
+    }), { expiresIn: 600 });
+    res.redirect(302, url);
   } catch (e) {
+    console.error('presign-get failed:', e);
     res.status(404).end();
   }
-});
-
-// ============================================================
-//  GET /reports — simple browser-friendly listing page
-// ============================================================
-app.get('/reports', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'reports.html'));
 });
 
 // ============================================================
 //  Health check
 // ============================================================
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, hasKey: !!API_KEY, model: MODEL, reportDir: REPORT_DIR });
+  res.json({
+    ok: true,
+    hasAnthropicKey: !!API_KEY,
+    r2Ready: R2_READY,
+    bucket: R2_READY ? R2_BUCKET : null,
+    model: MODEL,
+  });
 });
 
 // ============================================================
-//  404 fallback — last route, after every real handler
+//  404 + error handlers
 // ============================================================
 app.use((req, res) => {
   res.status(404).json({ error: 'not_found', path: req.url });
 });
 
-// ============================================================
-//  Error handler
-// ============================================================
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'internal_error', message: err.message });
 });
 
 process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));
-process.on('uncaughtException', (e) => console.error('uncaughtException', e));
+process.on('uncaughtException',  (e) => console.error('uncaughtException', e));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n★ Hollywood Car Wash listening on 0.0.0.0:${PORT}`);
-  console.log(`★ Health  /health`);
-  console.log(`★ Reports /reports\n`);
+  console.log(`★ R2 ready: ${R2_READY}${R2_READY ? ` (${R2_BUCKET})` : ''}`);
+  console.log(`★ Anthropic key: ${!!API_KEY}\n`);
 });

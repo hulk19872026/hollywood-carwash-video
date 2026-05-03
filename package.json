@@ -1,7 +1,7 @@
 {
   "name": "hollywood-car-wash",
-  "version": "1.0.0",
-  "description": "Hollywood Car Wash vehicle inspection app — records walk-around video, AI-analyzes for damage, generates PDF reports",
+  "version": "1.1.0",
+  "description": "Hollywood Car Wash vehicle inspection app — records walk-around video, AI-analyzes for damage, generates PDF reports, and uploads directly to R2",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -12,9 +12,10 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0",
+    "@aws-sdk/s3-request-presigner": "^3.658.0",
     "dotenv": "^16.4.5",
-    "express": "^4.21.1",
-    "multer": "^1.4.5-lts.1"
+    "express": "^4.21.1"
   },
   "license": "MIT"
 }
