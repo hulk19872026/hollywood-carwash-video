@@ -907,41 +907,78 @@ function formatBytes(b) {
 // ============================================================
 // FRAME EXTRACTION
 // ============================================================
-async function extractFrames(blob, count = 5) {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
-    video.src = URL.createObjectURL(blob);
-    const frames = [];
-
-    video.onloadedmetadata = async () => {
-      const duration = video.duration;
-      // Some webm blobs have Infinity duration; handle that
-      const dur = (isFinite(duration) && duration > 0) ? duration : 6;
-      const canvas = document.createElement('canvas');
-      // wait for first frame so we can size the canvas
-      await new Promise(r => { if (video.readyState >= 2) r(); else video.onloadeddata = r; });
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 360;
-      const ctx = canvas.getContext('2d');
-
-      for (let i = 0; i < count; i++) {
-        const t = (dur / (count + 1)) * (i + 1);
-        await new Promise(res => {
-          const handler = () => { video.removeEventListener('seeked', handler); res(); };
-          video.addEventListener('seeked', handler);
-          try { video.currentTime = t; } catch { res(); }
-        });
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
-        frames.push(dataUrl);
-      }
-      URL.revokeObjectURL(video.src);
-      resolve(frames);
-    };
-    video.onerror = (e) => reject(new Error('Video load failed'));
+function seekTo(video, t, timeoutMs = 4000) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; video.removeEventListener('seeked', onSeeked); resolve(); };
+    const onSeeked = () => finish();
+    video.addEventListener('seeked', onSeeked);
+    setTimeout(finish, timeoutMs);
+    try { video.currentTime = t; } catch { finish(); }
   });
+}
+
+// Safari + fragmented mp4 reports duration=Infinity until you scrub past the end.
+async function forceFiniteDuration(video) {
+  if (isFinite(video.duration) && video.duration > 0) return video.duration;
+  await new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; video.removeEventListener('durationchange', onChange); resolve(); };
+    const onChange = () => { if (isFinite(video.duration) && video.duration > 0) finish(); };
+    video.addEventListener('durationchange', onChange);
+    setTimeout(finish, 4000);
+    try { video.currentTime = 1e9; } catch { finish(); }
+  });
+  await seekTo(video, 0, 2000);
+  return video.duration;
+}
+
+async function extractFrames(blob, count = 5) {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.src = URL.createObjectURL(blob);
+  try {
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        video.removeEventListener('loadedmetadata', onMeta);
+        video.removeEventListener('error', onErr);
+      };
+      const onMeta = () => { cleanup(); resolve(); };
+      const onErr  = () => { cleanup(); reject(new Error('Video load failed')); };
+      video.addEventListener('loadedmetadata', onMeta);
+      video.addEventListener('error', onErr);
+      setTimeout(() => { cleanup(); reject(new Error('Metadata load timeout')); }, 8000);
+    });
+
+    if (video.readyState < 2) {
+      await new Promise(r => {
+        const onData = () => { video.removeEventListener('loadeddata', onData); r(); };
+        video.addEventListener('loadeddata', onData);
+        setTimeout(r, 4000);
+      });
+    }
+
+    const realDur = await forceFiniteDuration(video);
+    const dur = (isFinite(realDur) && realDur > 0) ? realDur : 6;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 360;
+    const ctx = canvas.getContext('2d');
+
+    const frames = [];
+    for (let i = 0; i < count; i++) {
+      const t = (dur / (count + 1)) * (i + 1);
+      await seekTo(video, t);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      frames.push(canvas.toDataURL('image/jpeg', 0.78));
+    }
+    return frames;
+  } finally {
+    URL.revokeObjectURL(video.src);
+  }
 }
 
 // ============================================================
