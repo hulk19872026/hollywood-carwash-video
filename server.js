@@ -28,7 +28,7 @@ console.log('★ Report directory:', REPORT_DIR);
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -182,7 +182,7 @@ app.get('/api/reports/:id/:file', async (req, res) => {
 //  GET /reports — simple browser-friendly listing page
 // ============================================================
 app.get('/reports', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'reports.html'));
+  res.sendFile(path.join(__dirname, 'reports.html'));
 });
 
 // ============================================================
