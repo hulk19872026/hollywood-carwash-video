@@ -81,15 +81,30 @@ function requireR2(res) {
 }
 
 const FILE_KIND = {
-  pdf:      { ext: '.pdf',           contentType: 'application/pdf' },
-  exterior: { ext: '_exterior.webm', contentType: 'video/webm' },
-  interior: { ext: '_interior.webm', contentType: 'video/webm' },
+  pdf:      { suffix: '',          contentType: 'application/pdf', ext: '.pdf'  },
+  exterior: { suffix: '_exterior', contentType: 'video/webm',      ext: '.webm' },
+  interior: { suffix: '_interior', contentType: 'video/webm',      ext: '.webm' },
 };
 
-function r2KeyFor(reportId, kind) {
-  const meta = FILE_KIND[kind];
-  if (!meta) return null;
-  return `reports/${reportId}/${reportId}${meta.ext}`;
+const VIDEO_MIME_EXT = {
+  'video/mp4':  '.mp4',
+  'video/webm': '.webm',
+};
+
+function resolveKindMeta(kind, requestedMime) {
+  const base = FILE_KIND[kind];
+  if (!base) return null;
+  if (kind === 'pdf' || !requestedMime) return base;
+  const m = String(requestedMime).split(';')[0].trim().toLowerCase();
+  const ext = VIDEO_MIME_EXT[m];
+  if (!ext) return base;
+  return { suffix: base.suffix, contentType: m, ext };
+}
+
+function r2KeyFor(reportId, kind, meta) {
+  const m = meta || FILE_KIND[kind];
+  if (!m) return null;
+  return `reports/${reportId}/${reportId}${m.suffix}${m.ext}`;
 }
 
 // ============================================================
@@ -138,16 +153,16 @@ app.post('/api/analyze', async (req, res) => {
 app.post('/api/presign-upload', async (req, res) => {
   if (!requireR2(res)) return;
   try {
-    const { reportId, files } = req.body || {};
+    const { reportId, files, mimes } = req.body || {};
     if (!reportId || !Array.isArray(files) || !files.length) {
       return res.status(400).json({ error: 'bad_request', message: 'reportId and files[] required' });
     }
     const id = sanitize(reportId);
     const uploads = {};
     for (const kind of files) {
-      const meta = FILE_KIND[kind];
+      const meta = resolveKindMeta(kind, mimes && mimes[kind]);
       if (!meta) continue;
-      const key = r2KeyFor(id, kind);
+      const key = r2KeyFor(id, kind, meta);
       const cmd = new PutObjectCommand({
         Bucket: R2_BUCKET,
         Key: key,
