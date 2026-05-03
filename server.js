@@ -27,8 +27,21 @@ mkdirSync(REPORT_DIR, { recursive: true });
 console.log('★ Report directory:', REPORT_DIR);
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', true);
 app.use(express.json({ limit: '20mb' }));
-app.use(express.static(__dirname));
+
+app.use((req, _res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+  next();
+});
+
+// ============================================================
+//  GET / — serve the inspection app
+// ============================================================
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -192,8 +205,26 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, hasKey: !!API_KEY, model: MODEL, reportDir: REPORT_DIR });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n★ Hollywood Car Wash running on port ${PORT}`);
-  console.log(`★ Open  http://localhost:${PORT}/`);
-  console.log(`★ Reports browser  http://localhost:${PORT}/reports\n`);
+// ============================================================
+//  404 fallback — last route, after every real handler
+// ============================================================
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', path: req.url });
+});
+
+// ============================================================
+//  Error handler
+// ============================================================
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'internal_error', message: err.message });
+});
+
+process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));
+process.on('uncaughtException', (e) => console.error('uncaughtException', e));
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n★ Hollywood Car Wash listening on 0.0.0.0:${PORT}`);
+  console.log(`★ Health  /health`);
+  console.log(`★ Reports /reports\n`);
 });
