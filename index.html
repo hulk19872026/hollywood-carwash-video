@@ -700,6 +700,8 @@ const state = {
   tech: '', customer: '', make: '', color: '', bay: '', serviceType: '',
   exteriorBlob: null,
   interiorBlob: null,
+  exteriorMime: '',
+  interiorMime: '',
   exteriorFrames: [],
   interiorFrames: [],
   analysis: null,
@@ -809,19 +811,45 @@ function stopCamera() {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
 }
 
+function pickRecorderMime() {
+  const candidates = [
+    'video/mp4;codecs=avc1,mp4a',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  for (const m of candidates) {
+    try { if (MediaRecorder.isTypeSupported(m)) return m; } catch {}
+  }
+  return '';
+}
+
 function toggleRecord(target) {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
   } else {
     if (!mediaStream) { alert('Start the camera first.'); return; }
     recordedChunks = [];
-    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9'
-              : MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8'
-              : 'video/webm';
-    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
+    const mime = pickRecorderMime();
+    try {
+      mediaRecorder = mime
+        ? new MediaRecorder(mediaStream, { mimeType: mime })
+        : new MediaRecorder(mediaStream);
+    } catch (e) {
+      console.error('MediaRecorder construction failed:', e);
+      alert('Recording is not supported in this browser.\n\n' + e.message);
+      return;
+    }
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.onstop = () => onRecordingStop(target);
-    mediaRecorder.start();
+    try {
+      mediaRecorder.start();
+    } catch (e) {
+      console.error('MediaRecorder.start failed:', e);
+      alert('Could not start recording.\n\n' + e.message);
+      return;
+    }
     recordStart = Date.now();
     document.getElementById('rec-' + target).classList.add('on');
     document.getElementById(target + '-rec-btn').textContent = '■ Stop';
@@ -839,6 +867,13 @@ function updateTimer(target) {
   document.getElementById('timer-' + target).textContent = m + ':' + s;
 }
 
+function baseMime(t) {
+  return (t || '').split(';')[0].trim().toLowerCase();
+}
+function extForMime(t) {
+  return baseMime(t) === 'video/mp4' ? '.mp4' : '.webm';
+}
+
 function onRecordingStop(target) {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   document.getElementById('rec-' + target).classList.remove('on');
@@ -846,14 +881,17 @@ function onRecordingStop(target) {
   btn.textContent = '↻ Re-record';
   btn.classList.remove('btn-primary');
   btn.classList.add('btn-danger');
-  const blob = new Blob(recordedChunks, { type: 'video/webm' });
+  const recordedMime = (mediaRecorder && mediaRecorder.mimeType) || 'video/webm';
+  const blob = new Blob(recordedChunks, { type: recordedMime });
   if (target === 'ext') {
     state.exteriorBlob = blob;
+    state.exteriorMime = baseMime(recordedMime);
     document.getElementById('ext-next-btn').disabled = false;
     document.getElementById('status-ext').textContent = '✓ Exterior recorded (' + formatBytes(blob.size) + ')';
     document.getElementById('status-ext').classList.add('done');
   } else {
     state.interiorBlob = blob;
+    state.interiorMime = baseMime(recordedMime);
     document.getElementById('int-send-btn').disabled = false;
     document.getElementById('status-int').textContent = '✓ Interior recorded (' + formatBytes(blob.size) + ')';
     document.getElementById('status-int').classList.add('done');
@@ -1358,7 +1396,7 @@ async function qDel(id)  { const s = await qTx('readwrite'); return new Promise(
 
 let _qProcessing = false;
 
-async function queueForUpload({ reportId, metadata, pdfBlob, exteriorBlob, interiorBlob }) {
+async function queueForUpload({ reportId, metadata, pdfBlob, exteriorBlob, interiorBlob, exteriorMime, interiorMime }) {
   const job = {
     reportId,
     metadata,
@@ -1366,6 +1404,10 @@ async function queueForUpload({ reportId, metadata, pdfBlob, exteriorBlob, inter
       ...(pdfBlob      ? { pdf: pdfBlob }           : {}),
       ...(exteriorBlob ? { exterior: exteriorBlob } : {}),
       ...(interiorBlob ? { interior: interiorBlob } : {}),
+    },
+    mimes: {
+      ...(exteriorBlob ? { exterior: exteriorMime || exteriorBlob.type || 'video/webm' } : {}),
+      ...(interiorBlob ? { interior: interiorMime || interiorBlob.type || 'video/webm' } : {}),
     },
     uploadedKeys: {},
     status: 'pending',
@@ -1408,7 +1450,7 @@ async function uploadJob(job) {
     const r = await fetch('/api/presign-upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reportId: job.reportId, files: kinds }),
+      body: JSON.stringify({ reportId: job.reportId, files: kinds, mimes: job.mimes || {} }),
     });
     if (!r.ok) throw new Error('presign-upload ' + r.status);
     const { uploads } = await r.json();
@@ -1491,6 +1533,8 @@ async function saveToFolder(pdfBlob) {
       pdfBlob,
       exteriorBlob: state.exteriorBlob,
       interiorBlob: state.interiorBlob,
+      exteriorMime: state.exteriorMime,
+      interiorMime: state.interiorMime,
     });
     result.serverSave = { ok: true, queued: true, reportId: baseName };
   } catch (e) {
@@ -1511,15 +1555,17 @@ async function saveToFolder(pdfBlob) {
       await w.write(pdfBlob); await w.close();
       result.filenames.push(baseName + '.pdf');
       // Save videos
+      const extExt = extForMime(state.exteriorMime || (state.exteriorBlob && state.exteriorBlob.type));
+      const intExt = extForMime(state.interiorMime || (state.interiorBlob && state.interiorBlob.type));
       if (state.exteriorBlob) {
-        const h = await state.folderHandle.getFileHandle(baseName + '_exterior.webm', { create: true });
+        const h = await state.folderHandle.getFileHandle(baseName + '_exterior' + extExt, { create: true });
         const ww = await h.createWritable(); await ww.write(state.exteriorBlob); await ww.close();
-        result.filenames.push(baseName + '_exterior.webm');
+        result.filenames.push(baseName + '_exterior' + extExt);
       }
       if (state.interiorBlob) {
-        const h = await state.folderHandle.getFileHandle(baseName + '_interior.webm', { create: true });
+        const h = await state.folderHandle.getFileHandle(baseName + '_interior' + intExt, { create: true });
         const ww = await h.createWritable(); await ww.write(state.interiorBlob); await ww.close();
-        result.filenames.push(baseName + '_interior.webm');
+        result.filenames.push(baseName + '_interior' + intExt);
       }
       result.saved = true;
       result.location = state.folderHandle.name;
@@ -1530,12 +1576,16 @@ async function saveToFolder(pdfBlob) {
   }
 
   // Fallback: trigger downloads
+  const extExt = extForMime(state.exteriorMime || (state.exteriorBlob && state.exteriorBlob.type));
+  const intExt = extForMime(state.interiorMime || (state.interiorBlob && state.interiorBlob.type));
   triggerDownload(pdfBlob, baseName + '.pdf');
-  if (state.exteriorBlob) triggerDownload(state.exteriorBlob, baseName + '_exterior.webm');
-  if (state.interiorBlob) triggerDownload(state.interiorBlob, baseName + '_interior.webm');
+  if (state.exteriorBlob) triggerDownload(state.exteriorBlob, baseName + '_exterior' + extExt);
+  if (state.interiorBlob) triggerDownload(state.interiorBlob, baseName + '_interior' + intExt);
   result.saved = true;
   result.location = 'Downloads folder';
-  result.filenames = [baseName + '.pdf', baseName + '_exterior.webm', baseName + '_interior.webm'];
+  result.filenames = [baseName + '.pdf'];
+  if (state.exteriorBlob) result.filenames.push(baseName + '_exterior' + extExt);
+  if (state.interiorBlob) result.filenames.push(baseName + '_interior' + intExt);
   return result;
 }
 
@@ -1641,6 +1691,7 @@ function escapeHtml(s) {
 function resetApp() {
   state.tech = state.customer = state.make = state.color = state.bay = state.serviceType = '';
   state.exteriorBlob = state.interiorBlob = null;
+  state.exteriorMime = state.interiorMime = '';
   state.exteriorFrames = []; state.interiorFrames = [];
   state.analysis = null; state.pdfBlob = null; state.reportName = '';
   document.getElementById('tech-name').value = '';
