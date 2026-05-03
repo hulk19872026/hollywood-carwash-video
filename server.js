@@ -22,6 +22,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   ListObjectsV2Command,
+  PutBucketCorsCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import 'dotenv/config';
@@ -317,8 +318,30 @@ app.use((err, _req, res, _next) => {
 process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));
 process.on('uncaughtException',  (e) => console.error('uncaughtException', e));
 
-app.listen(PORT, '0.0.0.0', () => {
+async function configureR2Cors() {
+  if (!R2_READY) return;
+  try {
+    await s3.send(new PutBucketCorsCommand({
+      Bucket: R2_BUCKET,
+      CORSConfiguration: {
+        CORSRules: [{
+          AllowedOrigins: ['*'],
+          AllowedMethods: ['PUT', 'GET', 'HEAD'],
+          AllowedHeaders: ['*'],
+          ExposeHeaders: ['ETag'],
+          MaxAgeSeconds: 3600,
+        }],
+      },
+    }));
+    console.log(`★ R2 CORS configured on ${R2_BUCKET}`);
+  } catch (e) {
+    console.error(`⚠️  R2 CORS configuration failed: ${e.message}`);
+  }
+}
+
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n★ Hollywood Car Wash listening on 0.0.0.0:${PORT}`);
   console.log(`★ R2 ready: ${R2_READY}${R2_READY ? ` (${R2_BUCKET})` : ''}`);
   console.log(`★ Anthropic key: ${!!API_KEY}\n`);
+  await configureR2Cors();
 });
