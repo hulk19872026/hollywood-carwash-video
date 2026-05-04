@@ -317,8 +317,19 @@ app.use((err, _req, res, _next) => {
 process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));
 process.on('uncaughtException',  (e) => console.error('uncaughtException', e));
 
+const BUILD_TAG = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || 'BUILD-CHECK-A1B2C3';
+
+app.get('/api/version', (_req, res) => {
+  res.json({
+    build: BUILD_TAG,
+    branch: process.env.RAILWAY_GIT_BRANCH || null,
+    deployedAt: new Date().toISOString(),
+  });
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n★ Hollywood Car Wash listening on 0.0.0.0:${PORT}`);
+  console.log(`★ Build: ${BUILD_TAG}`);
   console.log(`★ R2 ready: ${R2_READY}${R2_READY ? ` (${R2_BUCKET})` : ''}`);
   console.log(`★ Anthropic key: ${!!API_KEY}\n`);
 });
