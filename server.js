@@ -111,9 +111,17 @@ function r2KeyFor(reportId, kind, meta) {
 
 // ============================================================
 //  Static pages
+//  index.html and reports.html are versioned only by deploy SHA,
+//  so keep them out of the browser cache — otherwise iOS Safari
+//  serves stale JS for hours after a deploy.
 // ============================================================
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.get('/reports', (_req, res) => res.sendFile(path.join(__dirname, 'reports.html')));
+function noCache(res) {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+}
+app.get('/', (_req, res) => { noCache(res); res.sendFile(path.join(__dirname, 'index.html')); });
+app.get('/reports', (_req, res) => { noCache(res); res.sendFile(path.join(__dirname, 'reports.html')); });
 
 // ============================================================
 //  POST /api/analyze — Anthropic vision proxy
