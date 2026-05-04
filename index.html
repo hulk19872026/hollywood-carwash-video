@@ -507,125 +507,27 @@
         <span style="color:var(--red);">INSPECTION.</span>
       </h1>
       <div class="stars">★ ★ ★</div>
-      <p>Record exterior and interior video of the vehicle. AI scans for dents and scratches, reads the plate, and drops a PDF report into your designated folder.</p>
+      <p>Tap to start recording. AI scans for damage, reads the plate, and files the report automatically.</p>
     </div>
     <div class="home-actions">
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
-      <button class="btn btn-ghost" onclick="pickFolder()">📁 SET REPORT FOLDER</button>
       <a class="btn btn-ghost" href="/reports" target="_blank" style="text-decoration:none;">📋 VIEW REPORTS</a>
     </div>
-    <div class="folder-status" id="folder-status">
-      No folder selected — reports will download to your Downloads folder by default.
-    </div>
-    <div class="info" style="margin-top:18px;">
-      💡 <strong>Pro tip:</strong> For network drops, pick a mapped network drive (like <code>Z:\\HollywoodReports</code>). The report will save there automatically once permission is granted.
-    </div>
   </div>
 
-  <!-- ============ SCREEN: SETUP ============ -->
-  <div class="screen" id="screen-setup">
-    <div class="steps">
-      <div class="step active">1. Setup</div>
-      <div class="step">2. Exterior</div>
-      <div class="step">3. Interior</div>
-      <div class="step">4. Report</div>
-    </div>
+  <!-- ============ SCREEN: RECORDING ============ -->
+  <div class="screen" id="screen-record">
     <div class="panel">
-      <div class="panel-title"><span class="num">1</span> Inspection Details</div>
-      <div class="grid-2">
-        <div class="field">
-          <label for="tech-name">Technician Name</label>
-          <input type="text" id="tech-name" placeholder="e.g. Marco R." />
-        </div>
-        <div class="field">
-          <label for="customer-name">Customer Name (optional)</label>
-          <input type="text" id="customer-name" placeholder="e.g. John Smith" />
-        </div>
-        <div class="field">
-          <label for="vehicle-make">Make / Model (optional)</label>
-          <input type="text" id="vehicle-make" placeholder="e.g. Toyota Camry" />
-        </div>
-        <div class="field">
-          <label for="vehicle-color">Vehicle Color (optional)</label>
-          <input type="text" id="vehicle-color" placeholder="e.g. Silver" />
-        </div>
-        <div class="field">
-          <label for="bay-num">Bay / Stall Number</label>
-          <input type="text" id="bay-num" placeholder="e.g. Bay 3" />
-        </div>
-        <div class="field">
-          <label for="service-type">Service Type</label>
-          <select id="service-type">
-            <option>Full Detail</option>
-            <option>Exterior Only</option>
-            <option>Interior Only</option>
-            <option>Express Wash</option>
-            <option>Pre-Service Inspection</option>
-          </select>
-        </div>
-      </div>
-      <div class="info">
-        Optional fields can be left blank — AI will fill in what it can detect from the video. The plate and visible damage are extracted automatically.
-      </div>
-      <div class="btn-row">
-        <button class="btn btn-ghost" onclick="show('home')">← Back</button>
-        <button class="btn btn-primary" onclick="goToExterior()">Continue → Exterior</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ============ SCREEN: EXTERIOR ============ -->
-  <div class="screen" id="screen-exterior">
-    <div class="steps">
-      <div class="step done">1. Setup ✓</div>
-      <div class="step active">2. Exterior</div>
-      <div class="step">3. Interior</div>
-      <div class="step">4. Report</div>
-    </div>
-    <div class="panel">
-      <div class="panel-title"><span class="num">2</span> Exterior Walk-around</div>
-      <p style="margin-bottom:14px;color:var(--muted);font-size:14px;">
-        Walk around the vehicle slowly. Capture all four sides, including the license plate clearly. Aim for 30–60 seconds.
-      </p>
       <div class="video-wrap">
-        <video id="video-ext" autoplay muted playsinline></video>
-        <div class="rec-indicator" id="rec-ext"><span class="rec-dot"></span>REC</div>
-        <div class="timer" id="timer-ext">00:00</div>
+        <video id="video-rec" autoplay muted playsinline></video>
+        <div class="rec-indicator on" id="rec-indicator"><span class="rec-dot"></span>REC</div>
+        <div class="timer" id="timer-rec">00:00</div>
+        <div id="ts-overlay" style="position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.6);color:#fff;font:600 13px/1.2 monospace;padding:6px 10px;border-radius:6px;letter-spacing:.5px;"></div>
       </div>
-      <div class="clip-status" id="status-ext">Camera not started.</div>
+      <div class="clip-status" id="status-rec">Starting camera…</div>
       <div class="btn-row">
-        <button class="btn btn-ghost" onclick="show('setup')">← Back</button>
-        <button class="btn btn-primary" id="ext-start-btn" onclick="startCamera('ext')">📷 Start Camera</button>
-        <button class="btn btn-danger" id="ext-rec-btn" onclick="toggleRecord('ext')" disabled>● Record</button>
-        <button class="btn btn-primary" id="ext-next-btn" onclick="goToInterior()" disabled>Continue → Interior</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ============ SCREEN: INTERIOR ============ -->
-  <div class="screen" id="screen-interior">
-    <div class="steps">
-      <div class="step done">1. Setup ✓</div>
-      <div class="step done">2. Exterior ✓</div>
-      <div class="step active">3. Interior</div>
-      <div class="step">4. Report</div>
-    </div>
-    <div class="panel">
-      <div class="panel-title"><span class="num">3</span> Interior Recording</div>
-      <p style="margin-bottom:14px;color:var(--muted);font-size:14px;">
-        Open the doors and capture front seats, rear seats, dashboard, and trunk. Note any pre-existing stains, tears, or damage.
-      </p>
-      <div class="video-wrap">
-        <video id="video-int" autoplay muted playsinline></video>
-        <div class="rec-indicator" id="rec-int"><span class="rec-dot"></span>REC</div>
-        <div class="timer" id="timer-int">00:00</div>
-      </div>
-      <div class="clip-status" id="status-int">Camera not started.</div>
-      <div class="btn-row">
-        <button class="btn btn-ghost" onclick="goBackToExterior()">← Back</button>
-        <button class="btn btn-primary" id="int-start-btn" onclick="startCamera('int')">📷 Start Camera</button>
-        <button class="btn btn-danger" id="int-rec-btn" onclick="toggleRecord('int')" disabled>● Record</button>
-        <button class="btn btn-primary" id="int-send-btn" onclick="submitInspection()" disabled>📤 SEND & ANALYZE</button>
+        <button class="btn btn-ghost" onclick="cancelInspection()">← Cancel</button>
+        <button class="btn btn-primary" id="rec-submit-btn" onclick="stopAndSubmit()" disabled>📤 SEND &amp; ANALYZE</button>
       </div>
     </div>
   </div>
@@ -697,23 +599,19 @@
 // STATE
 // ============================================================
 const state = {
-  tech: '', customer: '', make: '', color: '', bay: '', serviceType: '',
-  exteriorBlob: null,
-  interiorBlob: null,
-  exteriorMime: '',
-  interiorMime: '',
+  tech: '', customer: '', make: '', color: '', bay: '', serviceType: 'Inspection',
+  videoBlob: null,
+  videoMime: '',
   exteriorFrames: [],
   interiorFrames: [],
   analysis: null,
   pdfBlob: null,
   reportName: '',
-  folderHandle: null,
 };
 
 let mediaRecorder = null;
 let mediaStream = null;
 let recordedChunks = [];
-let recordingTarget = null; // 'ext' or 'int'
 let timerInterval = null;
 let recordStart = 0;
 
@@ -726,73 +624,49 @@ function show(name) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-function startInspection() { show('setup'); }
+async function startInspection() {
+  // Default unfilled metadata; AI fills in what it can from the video.
+  state.tech = state.customer = state.make = state.color = state.bay = '';
+  state.serviceType = 'Inspection';
+  state.videoBlob = null;
+  state.videoMime = '';
 
-function goToExterior() {
-  state.tech = document.getElementById('tech-name').value.trim() || 'Unspecified';
-  state.customer = document.getElementById('customer-name').value.trim();
-  state.make = document.getElementById('vehicle-make').value.trim();
-  state.color = document.getElementById('vehicle-color').value.trim();
-  state.bay = document.getElementById('bay-num').value.trim();
-  state.serviceType = document.getElementById('service-type').value;
-  show('exterior');
-}
+  show('record');
+  const status = document.getElementById('status-rec');
+  const submitBtn = document.getElementById('rec-submit-btn');
+  submitBtn.disabled = true;
+  status.textContent = 'Starting camera…';
+  startTimestampOverlay();
 
-function goToInterior() {
-  stopCamera();
-  show('interior');
-}
-
-function goBackToExterior() {
-  stopCamera();
-  show('exterior');
-  // Re-prep exterior UI based on whether they already recorded
-  if (state.exteriorBlob) {
-    document.getElementById('status-ext').textContent = '✓ Exterior video saved (' + formatBytes(state.exteriorBlob.size) + ')';
-    document.getElementById('status-ext').classList.add('done');
-    document.getElementById('ext-next-btn').disabled = false;
-  }
-}
-
-// ============================================================
-// FOLDER PICKER (File System Access API)
-// ============================================================
-async function pickFolder() {
-  if (!('showDirectoryPicker' in window)) {
-    alert('Your browser does not support direct folder access.\n\nUse Chrome or Edge for this feature, or reports will download normally to your Downloads folder.');
-    return;
-  }
-  try {
-    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-    state.folderHandle = handle;
-    const el = document.getElementById('folder-status');
-    el.textContent = '✓ Reports will save to: ' + handle.name;
-    el.classList.add('set');
-  } catch (e) {
-    if (e.name !== 'AbortError') {
-      console.error(e);
-      alert('Could not access that folder: ' + e.message);
-    }
-  }
-}
-
-// ============================================================
-// CAMERA / RECORDING
-// ============================================================
-async function startCamera(target) {
-  recordingTarget = target;
-  const videoEl = document.getElementById('video-' + target);
-  const status = document.getElementById('status-' + target);
   try {
     stopCamera();
     mediaStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
       audio: false,
     });
+    const videoEl = document.getElementById('video-rec');
     videoEl.srcObject = mediaStream;
-    status.textContent = 'Camera ready. Press Record to begin.';
-    document.getElementById(target + '-rec-btn').disabled = false;
-    document.getElementById(target + '-start-btn').textContent = '🔄 Restart Camera';
+    await videoEl.play().catch(() => {});
+
+    recordedChunks = [];
+    const mime = pickRecorderMime();
+    try {
+      mediaRecorder = mime
+        ? new MediaRecorder(mediaStream, { mimeType: mime })
+        : new MediaRecorder(mediaStream);
+    } catch (e) {
+      console.error('MediaRecorder construction failed:', e);
+      alert('Recording is not supported in this browser.\n\n' + e.message);
+      cancelInspection();
+      return;
+    }
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.start();
+    recordStart = Date.now();
+    timerInterval = setInterval(updateRecordTimer, 250);
+
+    status.textContent = 'Recording — tap SEND & ANALYZE when done.';
+    submitBtn.disabled = false;
   } catch (e) {
     console.error(e);
     status.textContent = '⚠️ Camera error: ' + e.message;
@@ -800,6 +674,36 @@ async function startCamera(target) {
   }
 }
 
+function cancelInspection() {
+  stopCamera();
+  stopTimestampOverlay();
+  show('home');
+}
+
+function updateRecordTimer() {
+  const sec = Math.floor((Date.now() - recordStart) / 1000);
+  const m = String(Math.floor(sec / 60)).padStart(2, '0');
+  const s = String(sec % 60).padStart(2, '0');
+  const el = document.getElementById('timer-rec');
+  if (el) el.textContent = m + ':' + s;
+}
+
+let _tsInterval = null;
+function startTimestampOverlay() {
+  const el = document.getElementById('ts-overlay');
+  if (!el) return;
+  const tick = () => { el.textContent = new Date().toLocaleString(); };
+  tick();
+  if (_tsInterval) clearInterval(_tsInterval);
+  _tsInterval = setInterval(tick, 1000);
+}
+function stopTimestampOverlay() {
+  if (_tsInterval) { clearInterval(_tsInterval); _tsInterval = null; }
+}
+
+// ============================================================
+// CAMERA / RECORDING
+// ============================================================
 function stopCamera() {
   if (mediaStream) {
     mediaStream.getTracks().forEach(t => t.stop());
@@ -825,77 +729,11 @@ function pickRecorderMime() {
   return '';
 }
 
-function toggleRecord(target) {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-  } else {
-    if (!mediaStream) { alert('Start the camera first.'); return; }
-    recordedChunks = [];
-    const mime = pickRecorderMime();
-    try {
-      mediaRecorder = mime
-        ? new MediaRecorder(mediaStream, { mimeType: mime })
-        : new MediaRecorder(mediaStream);
-    } catch (e) {
-      console.error('MediaRecorder construction failed:', e);
-      alert('Recording is not supported in this browser.\n\n' + e.message);
-      return;
-    }
-    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
-    mediaRecorder.onstop = () => onRecordingStop(target);
-    try {
-      mediaRecorder.start();
-    } catch (e) {
-      console.error('MediaRecorder.start failed:', e);
-      alert('Could not start recording.\n\n' + e.message);
-      return;
-    }
-    recordStart = Date.now();
-    document.getElementById('rec-' + target).classList.add('on');
-    document.getElementById(target + '-rec-btn').textContent = '■ Stop';
-    document.getElementById(target + '-rec-btn').classList.remove('btn-danger');
-    document.getElementById(target + '-rec-btn').classList.add('btn-primary');
-    document.getElementById('status-' + target).textContent = 'Recording...';
-    timerInterval = setInterval(() => updateTimer(target), 250);
-  }
-}
-
-function updateTimer(target) {
-  const sec = Math.floor((Date.now() - recordStart) / 1000);
-  const m = String(Math.floor(sec / 60)).padStart(2, '0');
-  const s = String(sec % 60).padStart(2, '0');
-  document.getElementById('timer-' + target).textContent = m + ':' + s;
-}
-
 function baseMime(t) {
   return (t || '').split(';')[0].trim().toLowerCase();
 }
 function extForMime(t) {
   return baseMime(t) === 'video/mp4' ? '.mp4' : '.webm';
-}
-
-function onRecordingStop(target) {
-  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-  document.getElementById('rec-' + target).classList.remove('on');
-  const btn = document.getElementById(target + '-rec-btn');
-  btn.textContent = '↻ Re-record';
-  btn.classList.remove('btn-primary');
-  btn.classList.add('btn-danger');
-  const recordedMime = (mediaRecorder && mediaRecorder.mimeType) || 'video/webm';
-  const blob = new Blob(recordedChunks, { type: recordedMime });
-  if (target === 'ext') {
-    state.exteriorBlob = blob;
-    state.exteriorMime = baseMime(recordedMime);
-    document.getElementById('ext-next-btn').disabled = false;
-    document.getElementById('status-ext').textContent = '✓ Exterior recorded (' + formatBytes(blob.size) + ')';
-    document.getElementById('status-ext').classList.add('done');
-  } else {
-    state.interiorBlob = blob;
-    state.interiorMime = baseMime(recordedMime);
-    document.getElementById('int-send-btn').disabled = false;
-    document.getElementById('status-int').textContent = '✓ Interior recorded (' + formatBytes(blob.size) + ')';
-    document.getElementById('status-int').classList.add('done');
-  }
 }
 
 function formatBytes(b) {
@@ -1129,64 +967,68 @@ function setStatus(stepId, statusClass) {
   el.classList.add(statusClass);
 }
 
-async function submitInspection() {
-  stopCamera();
-  show('processing');
-  // Reset statuses
-  document.querySelectorAll('#status-list li').forEach(li => {
-    li.classList.remove('active', 'done');
-    li.classList.add('pending');
-  });
+async function stopAndSubmit() {
+  const submitBtn = document.getElementById('rec-submit-btn');
+  if (submitBtn) submitBtn.disabled = true;
+  stopTimestampOverlay();
 
-  try {
-    setStatus('frames', 'active');
-    const extFrames = await extractFrames(state.exteriorBlob, 5);
-    const intFrames = await extractFrames(state.interiorBlob, 4);
-    state.exteriorFrames = extFrames;
-    state.interiorFrames = intFrames;
-    setStatus('frames', 'done');
-
-    // Exterior analysis (covers damage + plate together to save calls)
-    setStatus('exterior', 'active');
-    const extRaw = await analyzeWithClaude(extFrames, EXTERIOR_PROMPT);
-    setStatus('exterior', 'done');
-
-    setStatus('plate', 'active');
-    // Plate is part of exterior analysis already; just show progress
-    await new Promise(r => setTimeout(r, 350));
-    setStatus('plate', 'done');
-
-    setStatus('interior', 'active');
-    const intRaw = await analyzeWithClaude(intFrames, INTERIOR_PROMPT);
-    setStatus('interior', 'done');
-
-    const exteriorAnalysis = safeParseJson(extRaw) || { _raw: extRaw };
-    const interiorAnalysis = safeParseJson(intRaw) || { _raw: intRaw };
-
-    state.analysis = {
-      exterior: exteriorAnalysis,
-      interior: interiorAnalysis,
-      exteriorRaw: extRaw,
-      interiorRaw: intRaw,
+  // Stop the recorder and wait for the final blob.
+  const blob = await new Promise((resolve) => {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      resolve(new Blob(recordedChunks, { type: 'video/webm' }));
+      return;
+    }
+    mediaRecorder.onstop = () => {
+      const mime = (mediaRecorder && mediaRecorder.mimeType) || 'video/webm';
+      resolve(new Blob(recordedChunks, { type: mime }));
     };
+    try { mediaRecorder.stop(); } catch { resolve(new Blob(recordedChunks, { type: 'video/webm' })); }
+  });
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  stopCamera();
 
-    setStatus('pdf', 'active');
-    const pdfBlob = await buildPdf();
-    state.pdfBlob = pdfBlob;
-    setStatus('pdf', 'done');
-
-    setStatus('save', 'active');
-    const saveResult = await saveToFolder(pdfBlob);
-    setStatus('save', 'done');
-
-    renderReport(saveResult);
-    show('report');
-  } catch (e) {
-    console.error(e);
-    alert('Something went wrong during analysis:\n\n' + e.message + '\n\nYou can try again or check the browser console for details.');
-    show('interior');
-  }
+  // Send analysis off to the background and bounce back to home immediately.
+  show('home');
+  processInspection(blob).catch((e) => {
+    console.error('background analysis failed:', e);
+    alert('Background analysis failed:\n\n' + (e.message || e));
+  });
 }
+
+async function processInspection(videoBlob) {
+  const recordedMime = baseMime(videoBlob.type) || 'video/webm';
+  state.videoBlob = videoBlob;
+  state.videoMime = recordedMime;
+
+  const frames = await extractFrames(videoBlob, 8);
+  state.exteriorFrames = frames;
+  state.interiorFrames = [];
+
+  const extRaw = await analyzeWithClaude(frames, EXTERIOR_PROMPT);
+  const exteriorAnalysis = safeParseJson(extRaw) || { _raw: extRaw };
+
+  state.analysis = {
+    exterior: exteriorAnalysis,
+    interior: { overall_condition: '—', summary: '', items_visible: [] },
+    exteriorRaw: extRaw,
+    interiorRaw: '',
+  };
+
+  // Name the report by plate if AI got one; otherwise timestamp.
+  const plate = (exteriorAnalysis.license_plate && exteriorAnalysis.license_plate.number)
+    ? sanitizeName(exteriorAnalysis.license_plate.number)
+    : '';
+  const now = new Date();
+  const ts = now.getFullYear() + pad2(now.getMonth()+1) + pad2(now.getDate()) + '-' + pad2(now.getHours()) + pad2(now.getMinutes()) + pad2(now.getSeconds());
+  state.reportName = plate ? `HCW-${plate}-${ts}` : `HCW-${ts}`;
+
+  const pdfBlob = await buildPdf();
+  state.pdfBlob = pdfBlob;
+  await saveToFolder(pdfBlob);
+}
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+function sanitizeName(s) { return String(s).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16); }
 
 // ============================================================
 // PDF GENERATION
@@ -1471,18 +1313,16 @@ async function qDel(id)  { const s = await qTx('readwrite'); return new Promise(
 
 let _qProcessing = false;
 
-async function queueForUpload({ reportId, metadata, pdfBlob, exteriorBlob, interiorBlob, exteriorMime, interiorMime }) {
+async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMime }) {
   const job = {
     reportId,
     metadata,
     files: {
-      ...(pdfBlob      ? { pdf: pdfBlob }           : {}),
-      ...(exteriorBlob ? { exterior: exteriorBlob } : {}),
-      ...(interiorBlob ? { interior: interiorBlob } : {}),
+      ...(pdfBlob   ? { pdf: pdfBlob }     : {}),
+      ...(videoBlob ? { video: videoBlob } : {}),
     },
     mimes: {
-      ...(exteriorBlob ? { exterior: exteriorMime || exteriorBlob.type || 'video/webm' } : {}),
-      ...(interiorBlob ? { interior: interiorMime || interiorBlob.type || 'video/webm' } : {}),
+      ...(videoBlob ? { video: videoMime || videoBlob.type || 'video/webm' } : {}),
     },
     uploadedKeys: {},
     status: 'pending',
@@ -1650,80 +1490,33 @@ async function saveToServer() {
 }
 
 async function saveToFolder(pdfBlob) {
-  const baseName = state.reportName + (state.tech ? '_' + state.tech.replace(/\W+/g, '') : '');
+  const baseName = state.reportName;
   const result = { saved: false, location: '', filenames: [], serverSave: null };
 
-  // Enqueue for background upload to R2 (returns immediately).
   try {
     await queueForUpload({
       reportId: baseName,
       metadata: {
         reportId: baseName,
-        tech: state.tech,
-        customer: state.customer,
-        bay: state.bay,
-        serviceType: state.serviceType,
-        vehicleColor: state.color,
-        vehicleMake: state.make,
         analysis: state.analysis,
         timestamp: new Date().toISOString(),
       },
       pdfBlob,
-      exteriorBlob: state.exteriorBlob,
-      interiorBlob: state.interiorBlob,
-      exteriorMime: state.exteriorMime,
-      interiorMime: state.interiorMime,
+      videoBlob: state.videoBlob,
+      videoMime: state.videoMime,
     });
     result.serverSave = { ok: true, queued: true, reportId: baseName };
   } catch (e) {
     result.serverSave = { ok: false, error: e.message };
   }
 
-  if (state.folderHandle) {
-    try {
-      // Try to verify permission still
-      const perm = await state.folderHandle.queryPermission({ mode: 'readwrite' });
-      if (perm !== 'granted') {
-        const req = await state.folderHandle.requestPermission({ mode: 'readwrite' });
-        if (req !== 'granted') throw new Error('Folder permission denied');
-      }
-      // Save PDF
-      const pdfHandle = await state.folderHandle.getFileHandle(baseName + '.pdf', { create: true });
-      const w = await pdfHandle.createWritable();
-      await w.write(pdfBlob); await w.close();
-      result.filenames.push(baseName + '.pdf');
-      // Save videos
-      const extExt = extForMime(state.exteriorMime || (state.exteriorBlob && state.exteriorBlob.type));
-      const intExt = extForMime(state.interiorMime || (state.interiorBlob && state.interiorBlob.type));
-      if (state.exteriorBlob) {
-        const h = await state.folderHandle.getFileHandle(baseName + '_exterior' + extExt, { create: true });
-        const ww = await h.createWritable(); await ww.write(state.exteriorBlob); await ww.close();
-        result.filenames.push(baseName + '_exterior' + extExt);
-      }
-      if (state.interiorBlob) {
-        const h = await state.folderHandle.getFileHandle(baseName + '_interior' + intExt, { create: true });
-        const ww = await h.createWritable(); await ww.write(state.interiorBlob); await ww.close();
-        result.filenames.push(baseName + '_interior' + intExt);
-      }
-      result.saved = true;
-      result.location = state.folderHandle.name;
-      return result;
-    } catch (e) {
-      console.warn('Folder save failed, falling back to download:', e);
-    }
-  }
-
-  // Fallback: trigger downloads
-  const extExt = extForMime(state.exteriorMime || (state.exteriorBlob && state.exteriorBlob.type));
-  const intExt = extForMime(state.interiorMime || (state.interiorBlob && state.interiorBlob.type));
+  const vidExt = extForMime(state.videoMime || (state.videoBlob && state.videoBlob.type));
   triggerDownload(pdfBlob, baseName + '.pdf');
-  if (state.exteriorBlob) triggerDownload(state.exteriorBlob, baseName + '_exterior' + extExt);
-  if (state.interiorBlob) triggerDownload(state.interiorBlob, baseName + '_interior' + intExt);
+  if (state.videoBlob) triggerDownload(state.videoBlob, baseName + vidExt);
   result.saved = true;
   result.location = 'Downloads folder';
   result.filenames = [baseName + '.pdf'];
-  if (state.exteriorBlob) result.filenames.push(baseName + '_exterior' + extExt);
-  if (state.interiorBlob) result.filenames.push(baseName + '_interior' + intExt);
+  if (state.videoBlob) result.filenames.push(baseName + vidExt);
   return result;
 }
 
@@ -1827,30 +1620,14 @@ function escapeHtml(s) {
 // RESET
 // ============================================================
 function resetApp() {
-  state.tech = state.customer = state.make = state.color = state.bay = state.serviceType = '';
-  state.exteriorBlob = state.interiorBlob = null;
-  state.exteriorMime = state.interiorMime = '';
+  state.tech = state.customer = state.make = state.color = state.bay = '';
+  state.serviceType = 'Inspection';
+  state.videoBlob = null;
+  state.videoMime = '';
   state.exteriorFrames = []; state.interiorFrames = [];
   state.analysis = null; state.pdfBlob = null; state.reportName = '';
-  document.getElementById('tech-name').value = '';
-  document.getElementById('customer-name').value = '';
-  document.getElementById('vehicle-make').value = '';
-  document.getElementById('vehicle-color').value = '';
-  document.getElementById('bay-num').value = '';
-  document.getElementById('ext-next-btn').disabled = true;
-  document.getElementById('int-send-btn').disabled = true;
-  document.getElementById('ext-rec-btn').disabled = true;
-  document.getElementById('int-rec-btn').disabled = true;
-  document.getElementById('status-ext').textContent = 'Camera not started.';
-  document.getElementById('status-int').textContent = 'Camera not started.';
-  document.getElementById('status-ext').classList.remove('done');
-  document.getElementById('status-int').classList.remove('done');
-  document.getElementById('timer-ext').textContent = '00:00';
-  document.getElementById('timer-int').textContent = '00:00';
-  document.getElementById('ext-start-btn').textContent = '📷 Start Camera';
-  document.getElementById('int-start-btn').textContent = '📷 Start Camera';
-  document.getElementById('ext-rec-btn').textContent = '● Record';
-  document.getElementById('int-rec-btn').textContent = '● Record';
+  const t = document.getElementById('timer-rec'); if (t) t.textContent = '00:00';
+  const s = document.getElementById('status-rec'); if (s) s.textContent = '';
   show('home');
 }
 
