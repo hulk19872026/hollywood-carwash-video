@@ -1368,6 +1368,23 @@ const MAX_UPLOAD_ATTEMPTS = 6;
 const PUT_TIMEOUT_MS = 5 * 60 * 1000;
 const API_TIMEOUT_MS = 30 * 1000;
 
+// iOS Safari fetch() with PUT + Blob body throws a generic "Load failed" on
+// cellular and offers no progress signal. XHR is more reliable for blob
+// uploads on iOS and exposes status/responseText for diagnostics.
+function xhrPut(url, body, contentType, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+    xhr.timeout = timeoutMs;
+    xhr.setRequestHeader('Content-Type', contentType);
+    xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText || '' });
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.ontimeout = () => { const e = new Error('timed out'); e.name = 'TimeoutError'; reject(e); };
+    xhr.onabort = () => reject(new Error('aborted'));
+    xhr.send(body);
+  });
+}
+
 async function uploadJob(job) {
   if ((job.attempts || 0) >= MAX_UPLOAD_ATTEMPTS) {
     throw new Error(`gave up after ${job.attempts} attempts (last: ${job.lastError || 'unknown'})`);
@@ -1390,6 +1407,7 @@ async function uploadJob(job) {
     const { uploads } = await r.json();
 
     const uploadedKeys = { ...(job.uploadedKeys || {}) };
+    const kindErrors = [];
     for (const kind of kinds) {
       const u = uploads[kind];
       const blob = job.files[kind];
@@ -1398,26 +1416,26 @@ async function uploadJob(job) {
       // overrides if blob.type carries ;codecs=... So re-wrap with the
       // exact content type the URL was signed with.
       const upBlob = blob.type === u.contentType ? blob : new Blob([blob], { type: u.contentType });
-      let put;
       try {
-        put = await fetchWithTimeout(u.url, {
-          method: 'PUT',
-          headers: { 'Content-Type': u.contentType },
-          body: upBlob,
-        }, PUT_TIMEOUT_MS);
+        const put = await xhrPut(u.url, upBlob, u.contentType, PUT_TIMEOUT_MS);
+        if (put.status < 200 || put.status >= 300) {
+          const detail = (put.body || '').slice(0, 200);
+          throw new Error(`PUT ${kind} returned ${put.status}${detail ? ' — ' + detail : ''}`);
+        }
+        uploadedKeys[kind] = u.key;
+        await qPut({ ...job, uploadedKeys, status: 'uploading' });
+        job.uploadedKeys = uploadedKeys;
       } catch (e) {
-        if (e.name === 'AbortError') throw new Error(`PUT ${kind} timed out after ${Math.round(PUT_TIMEOUT_MS/1000)}s (${formatBytes(blob.size)})`);
-        throw new Error(`PUT ${kind} network error: ${e.message || e}`);
+        // Don't fail-fast: record this kind's error and keep trying the rest
+        // so a flaky pdf doesn't block the (more important) video upload.
+        const msg = e.name === 'TimeoutError'
+          ? `PUT ${kind} timed out after ${Math.round(PUT_TIMEOUT_MS/1000)}s (${formatBytes(blob.size)})`
+          : (e.message && e.message.startsWith('PUT ')) ? e.message
+          : `PUT ${kind} network error: ${e.message || e}`;
+        kindErrors.push(msg);
       }
-      if (!put.ok) {
-        let detail = '';
-        try { detail = (await put.text()).slice(0, 200); } catch {}
-        throw new Error(`PUT ${kind} returned ${put.status}${detail ? ' — ' + detail : ''}`);
-      }
-      uploadedKeys[kind] = u.key;
-      await qPut({ ...job, uploadedKeys, status: 'uploading' });
-      job.uploadedKeys = uploadedKeys;
     }
+    if (kindErrors.length) throw new Error(kindErrors.join(' | '));
   }
 
   let fin;
