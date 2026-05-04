@@ -82,6 +82,8 @@ function requireR2(res) {
 
 const FILE_KIND = {
   pdf:      { suffix: '',          contentType: 'application/pdf', ext: '.pdf'  },
+  video:    { suffix: '',          contentType: 'video/webm',      ext: '.webm' },
+  // Legacy kinds — older queued jobs may still reference these.
   exterior: { suffix: '_exterior', contentType: 'video/webm',      ext: '.webm' },
   interior: { suffix: '_interior', contentType: 'video/webm',      ext: '.webm' },
 };
