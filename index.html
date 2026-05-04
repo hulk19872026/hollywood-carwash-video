@@ -1530,7 +1530,7 @@ const API_TIMEOUT_MS = 30 * 1000;
 
 async function uploadJob(job) {
   if ((job.attempts || 0) >= MAX_UPLOAD_ATTEMPTS) {
-    throw new Error(`gave up after ${job.attempts} attempts`);
+    throw new Error(`gave up after ${job.attempts} attempts (last: ${job.lastError || 'unknown'})`);
   }
   await qPut({ ...job, status: 'uploading' });
   const kinds = Object.keys(job.files).filter(k => !job.uploadedKeys?.[k]);
@@ -1628,8 +1628,10 @@ async function showQueueDetails() {
   const failedCount = jobs.filter(j => j.status === 'failed').length;
   const action = '\n\nTap OK to retry pending/failed jobs now.\nTap Cancel to DELETE all queued jobs.';
   if (confirm(`Upload queue (${jobs.length}, ${formatBytes(totalBytes)}):\n\n${lines}${action}`)) {
+    // Reset attempts so the cap doesn't immediately reject, but KEEP
+    // lastError so we don't lose diagnostic info on the retry round.
     for (const j of jobs) {
-      await qPut({ ...j, status: 'pending', lastError: null, attempts: 0 });
+      await qPut({ ...j, status: 'pending', attempts: 0 });
     }
     processQueue();
   } else {
