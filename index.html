@@ -952,36 +952,48 @@ async function extractFrames(blob, count = 5) {
   video.muted = true;
   video.playsInline = true;
   video.preload = 'auto';
+  video.setAttribute('muted', '');
+  video.setAttribute('playsinline', '');
   // iOS Safari often refuses to decode frames for an off-DOM video,
   // so attach the element invisibly to the document.
   video.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;';
   document.body.appendChild(video);
   video.src = URL.createObjectURL(blob);
+  try { video.load(); } catch {}
 
   try {
+    // Resolve as soon as ANY readiness signal arrives. iOS sometimes
+    // emits loadedmetadata but never loadeddata for blob-URL videos
+    // until something nudges the pipeline (play, seek, etc.).
     await new Promise((resolve, reject) => {
       let done = false;
+      const events = ['loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough'];
       const finish = (ok, err) => {
         if (done) return;
         done = true;
-        video.removeEventListener('loadeddata', onData);
+        for (const ev of events) video.removeEventListener(ev, onAny);
         video.removeEventListener('error', onErr);
         ok ? resolve() : reject(err || new Error('Video load failed'));
       };
-      const onData = () => finish(true);
+      const onAny = () => finish(true);
       const onErr = () => finish(false);
-      video.addEventListener('loadeddata', onData);
+      for (const ev of events) video.addEventListener(ev, onAny);
       video.addEventListener('error', onErr);
-      setTimeout(() => finish(false, new Error('Video load timeout')), 12000);
+      // Fast path: maybe metadata is already there.
+      if (video.readyState >= 1) finish(true);
+      setTimeout(() => finish(false, new Error('Video load timeout (readyState=' + video.readyState + ')')), 20000);
     });
 
     // Warm the decoder. On Safari, fragmented mp4 sometimes won't paint
-    // frames on seek until the pipeline has actually played at least
-    // briefly.
+    // frames on seek until the pipeline has actually played briefly.
+    // Wrap defensively — play() may reject if autoplay policy blocks it.
     try {
-      await video.play();
-      await new Promise(r => setTimeout(r, 150));
-      video.pause();
+      const p = video.play();
+      if (p && typeof p.then === 'function') {
+        await Promise.race([p, new Promise(r => setTimeout(r, 1500))]);
+      }
+      await new Promise(r => setTimeout(r, 200));
+      try { video.pause(); } catch {}
     } catch {}
 
     const realDur = await forceFiniteDuration(video);
