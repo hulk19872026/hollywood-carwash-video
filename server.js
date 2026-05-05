@@ -22,6 +22,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   ListObjectsV2Command,
+  DeleteObjectsCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import 'dotenv/config';
@@ -29,10 +30,12 @@ import 'dotenv/config';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-const PORT       = process.env.PORT || 3000;
-const API_KEY    = process.env.ANTHROPIC_API_KEY;
-const MODEL      = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514';
-const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || '1500', 10);
+const PORT            = process.env.PORT || 3000;
+const API_KEY         = process.env.ANTHROPIC_API_KEY;
+const MODEL           = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514';
+const MAX_TOKENS      = parseInt(process.env.MAX_TOKENS || '1500', 10);
+const RETENTION_DAYS  = parseInt(process.env.RETENTION_DAYS || '30', 10);
+const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const R2_ACCOUNT_ID        = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID     = process.env.R2_ACCESS_KEY_ID;
@@ -300,6 +303,77 @@ app.get('/api/reports/:id/:file', async (req, res) => {
 });
 
 // ============================================================
+//  Retention sweep — delete report folders older than RETENTION_DAYS
+// ============================================================
+async function pruneOldReports() {
+  if (!R2_READY) return;
+  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let deletedFolders = 0;
+  let deletedObjects = 0;
+  try {
+    const top = await s3.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET,
+      Prefix: 'reports/',
+      Delimiter: '/',
+    }));
+    const ids = (top.CommonPrefixes || [])
+      .map(p => p.Prefix.replace(/^reports\//, '').replace(/\/$/, ''))
+      .filter(Boolean);
+
+    for (const id of ids) {
+      try {
+        const inner = await s3.send(new ListObjectsV2Command({
+          Bucket: R2_BUCKET,
+          Prefix: `reports/${id}/`,
+        }));
+        const contents = inner.Contents || [];
+        if (!contents.length) continue;
+
+        let folderTime = null;
+        const metaObj = contents.find(c => c.Key.endsWith('/metadata.json'));
+        if (metaObj) {
+          try {
+            const got = await s3.send(new GetObjectCommand({
+              Bucket: R2_BUCKET,
+              Key: metaObj.Key,
+            }));
+            const text = await got.Body.transformToString('utf8');
+            const j = JSON.parse(text);
+            const ts = j.timestamp || j.finalizedAt;
+            if (ts) folderTime = Date.parse(ts);
+          } catch {}
+        }
+        if (!folderTime) {
+          const newest = contents
+            .map(c => c.LastModified ? +new Date(c.LastModified) : 0)
+            .sort((a, b) => b - a)[0];
+          folderTime = newest || null;
+        }
+        if (!folderTime || folderTime > cutoff) continue;
+
+        const result = await s3.send(new DeleteObjectsCommand({
+          Bucket: R2_BUCKET,
+          Delete: { Objects: contents.map(c => ({ Key: c.Key })), Quiet: true },
+        }));
+        if (result.Errors && result.Errors.length) {
+          console.error(`prune ${id} partial errors:`, result.Errors);
+        }
+        deletedFolders++;
+        deletedObjects += contents.length;
+        console.log(`✓ Pruned report ${id} (${contents.length} objects)`);
+      } catch (e) {
+        console.error(`prune ${id} failed:`, e.message);
+      }
+    }
+    if (deletedFolders) {
+      console.log(`★ Retention sweep: removed ${deletedFolders} folders / ${deletedObjects} objects (>${RETENTION_DAYS}d)`);
+    }
+  } catch (e) {
+    console.error('pruneOldReports failed:', e);
+  }
+}
+
+// ============================================================
 //  Health check
 // ============================================================
 app.get('/health', (_req, res) => {
@@ -341,5 +415,11 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n★ Hollywood Car Wash listening on 0.0.0.0:${PORT}`);
   console.log(`★ Build: ${BUILD_TAG}`);
   console.log(`★ R2 ready: ${R2_READY}${R2_READY ? ` (${R2_BUCKET})` : ''}`);
-  console.log(`★ Anthropic key: ${!!API_KEY}\n`);
+  console.log(`★ Anthropic key: ${!!API_KEY}`);
+  console.log(`★ Retention: ${RETENTION_DAYS} days\n`);
+
+  if (R2_READY) {
+    pruneOldReports();
+    setInterval(pruneOldReports, PRUNE_INTERVAL_MS);
+  }
 });

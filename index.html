@@ -199,10 +199,9 @@
     border: 2px solid var(--line);
     border-radius: 6px;
     overflow: hidden;
-    aspect-ratio: 16/9;
   }
   video {
-    width: 100%; height: 100%; object-fit: cover; display: block;
+    width: 100%; height: auto; display: block;
     background: #000;
   }
   .rec-indicator {
@@ -641,9 +640,20 @@ async function startInspection() {
   try {
     stopCamera();
     mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 30 },
+        advanced: [
+          { focusMode: 'continuous' },
+          { exposureMode: 'continuous' },
+          { whiteBalanceMode: 'continuous' },
+        ],
+      },
       audio: false,
     });
+    const settings = await applyCameraTuning(mediaStream);
     const videoEl = document.getElementById('video-rec');
     videoEl.srcObject = mediaStream;
     await videoEl.play().catch(() => {});
@@ -651,9 +661,9 @@ async function startInspection() {
     recordedChunks = [];
     const mime = pickRecorderMime();
     try {
-      mediaRecorder = mime
-        ? new MediaRecorder(mediaStream, { mimeType: mime })
-        : new MediaRecorder(mediaStream);
+      const opts = { videoBitsPerSecond: 8_000_000 };
+      if (mime) opts.mimeType = mime;
+      mediaRecorder = new MediaRecorder(mediaStream, opts);
     } catch (e) {
       console.error('MediaRecorder construction failed:', e);
       alert('Recording is not supported in this browser.\n\n' + e.message);
@@ -665,7 +675,12 @@ async function startInspection() {
     recordStart = Date.now();
     timerInterval = setInterval(updateRecordTimer, 250);
 
-    status.textContent = 'Recording — tap SEND & ANALYZE when done.';
+    const dims = settings && settings.width && settings.height
+      ? `${settings.width}×${settings.height}` + (settings.frameRate ? ` @ ${Math.round(settings.frameRate)}fps` : '')
+      : '';
+    status.textContent = dims
+      ? `Recording ${dims} — tap SEND & ANALYZE when done.`
+      : 'Recording — tap SEND & ANALYZE when done.';
     submitBtn.disabled = false;
   } catch (e) {
     console.error(e);
@@ -704,6 +719,32 @@ function stopTimestampOverlay() {
 // ============================================================
 // CAMERA / RECORDING
 // ============================================================
+async function applyCameraTuning(stream) {
+  const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+  if (!track) return null;
+  try {
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    const advanced = [];
+    if (caps.focusMode && caps.focusMode.includes && caps.focusMode.includes('continuous')) {
+      advanced.push({ focusMode: 'continuous' });
+    }
+    if (caps.exposureMode && caps.exposureMode.includes && caps.exposureMode.includes('continuous')) {
+      advanced.push({ exposureMode: 'continuous' });
+    }
+    if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes && caps.whiteBalanceMode.includes('continuous')) {
+      advanced.push({ whiteBalanceMode: 'continuous' });
+    }
+    if (advanced.length && track.applyConstraints) {
+      try { await track.applyConstraints({ advanced }); } catch (e) { console.warn('applyConstraints failed:', e); }
+    }
+  } catch (e) {
+    console.warn('camera tuning skipped:', e);
+  }
+  const settings = track.getSettings ? track.getSettings() : null;
+  console.info('camera settings:', settings);
+  return settings;
+}
+
 function stopCamera() {
   if (mediaStream) {
     mediaStream.getTracks().forEach(t => t.stop());
@@ -785,6 +826,35 @@ async function forceFiniteDuration(video) {
   return video.duration;
 }
 
+// Laplacian-variance sharpness score on a downsampled grayscale buffer.
+// Higher value = sharper frame.
+function frameSharpness(srcCanvas) {
+  const W = 240;
+  const H = Math.max(1, Math.round(srcCanvas.height * W / srcCanvas.width));
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(srcCanvas, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const gray = new Float32Array(W * H);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    gray[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  }
+  let sum = 0, sumSq = 0, n = 0;
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      const lap = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - W] - gray[i + W];
+      sum += lap; sumSq += lap * lap; n++;
+    }
+  }
+  if (!n) return 0;
+  const mean = sum / n;
+  return sumSq / n - mean * mean;
+}
+
 async function extractFrames(blob, count = 5) {
   const video = document.createElement('video');
   video.muted = true;
@@ -838,17 +908,31 @@ async function extractFrames(blob, count = 5) {
     const dur = (isFinite(realDur) && realDur > 0) ? realDur : 6;
 
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 360;
+    canvas.width = video.videoWidth || 1920;
+    canvas.height = video.videoHeight || 1080;
     const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
+    console.info('extractFrames source:', { w: video.videoWidth, h: video.videoHeight, dur });
+
+    // For each target slot, sample a few nearby timestamps and keep the sharpest.
+    const probes = [-0.25, 0, 0.25];
     const frames = [];
     for (let i = 0; i < count; i++) {
-      // Stay a hair before the end so we don't sample the post-end blank.
-      const t = Math.min(dur * (i + 1) / (count + 1), Math.max(0, dur - 0.05));
-      await seekAndPaint(video, t);
+      const center = dur * (i + 1) / (count + 1);
+      let bestT = center, bestScore = -Infinity;
+      for (const dt of probes) {
+        const t = Math.max(0, Math.min(center + dt, Math.max(0, dur - 0.05)));
+        await seekAndPaint(video, t);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const score = frameSharpness(canvas);
+        if (score > bestScore) { bestScore = score; bestT = t; }
+      }
+      // Re-render the winning frame and encode at high quality.
+      await seekAndPaint(video, bestT);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      frames.push(canvas.toDataURL('image/jpeg', 0.78));
+      frames.push(canvas.toDataURL('image/jpeg', 0.92));
     }
     return frames;
   } finally {
@@ -1033,6 +1117,19 @@ function sanitizeName(s) { return String(s).toUpperCase().replace(/[^A-Z0-9]/g, 
 // ============================================================
 // PDF GENERATION
 // ============================================================
+function firstFrameAspect(frames, fallback = 16/9) {
+  return new Promise(resolve => {
+    if (!frames || !frames.length) return resolve(fallback);
+    const img = new Image();
+    img.onload = () => {
+      const a = img.naturalWidth / img.naturalHeight;
+      resolve(isFinite(a) && a > 0 ? a : fallback);
+    };
+    img.onerror = () => resolve(fallback);
+    img.src = frames[0];
+  });
+}
+
 async function buildPdf() {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
@@ -1233,17 +1330,18 @@ async function buildPdf() {
 
   let fy = 70;
   const frameW = (W - 2*M - 12) / 2;
-  const frameH = frameW * 9/16;
+  const extAspect = await firstFrameAspect(state.exteriorFrames);
+  const extFrameH = frameW / extAspect;
   state.exteriorFrames.forEach((f, i) => {
     const col = i % 2;
     const row = Math.floor(i / 2);
     const fx = M + col * (frameW + 12);
-    const fyy = fy + row * (frameH + 12);
-    if (fyy + frameH > H - M) return;
-    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, frameH); } catch {}
+    const fyy = fy + row * (extFrameH + 12);
+    if (fyy + extFrameH > H - M) return;
+    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, extFrameH); } catch {}
     doc.setDrawColor(255, 212, 0);
     doc.setLineWidth(0.5);
-    doc.rect(fx, fyy, frameW, frameH);
+    doc.rect(fx, fyy, frameW, extFrameH);
   });
 
   doc.addPage();
@@ -1255,16 +1353,18 @@ async function buildPdf() {
   doc.text('SAMPLED FRAMES — INTERIOR', M, 32);
 
   fy = 70;
+  const intAspect = await firstFrameAspect(state.interiorFrames);
+  const intFrameH = frameW / intAspect;
   state.interiorFrames.forEach((f, i) => {
     const col = i % 2;
     const row = Math.floor(i / 2);
     const fx = M + col * (frameW + 12);
-    const fyy = fy + row * (frameH + 12);
-    if (fyy + frameH > H - M) return;
-    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, frameH); } catch {}
+    const fyy = fy + row * (intFrameH + 12);
+    if (fyy + intFrameH > H - M) return;
+    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, intFrameH); } catch {}
     doc.setDrawColor(255, 212, 0);
     doc.setLineWidth(0.5);
-    doc.rect(fx, fyy, frameW, frameH);
+    doc.rect(fx, fyy, frameW, intFrameH);
   });
 
   // ---- FOOTER on every page ----
