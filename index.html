@@ -640,7 +640,11 @@ async function startInspection() {
   try {
     stopCamera();
     mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
       audio: false,
     });
     const videoEl = document.getElementById('video-rec');
@@ -650,9 +654,9 @@ async function startInspection() {
     recordedChunks = [];
     const mime = pickRecorderMime();
     try {
-      mediaRecorder = mime
-        ? new MediaRecorder(mediaStream, { mimeType: mime })
-        : new MediaRecorder(mediaStream);
+      const opts = { videoBitsPerSecond: 8_000_000 };
+      if (mime) opts.mimeType = mime;
+      mediaRecorder = new MediaRecorder(mediaStream, opts);
     } catch (e) {
       console.error('MediaRecorder construction failed:', e);
       alert('Recording is not supported in this browser.\n\n' + e.message);
@@ -847,7 +851,7 @@ async function extractFrames(blob, count = 5) {
       const t = Math.min(dur * (i + 1) / (count + 1), Math.max(0, dur - 0.05));
       await seekAndPaint(video, t);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      frames.push(canvas.toDataURL('image/jpeg', 0.78));
+      frames.push(canvas.toDataURL('image/jpeg', 0.92));
     }
     return frames;
   } finally {
