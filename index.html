@@ -1032,6 +1032,19 @@ function sanitizeName(s) { return String(s).toUpperCase().replace(/[^A-Z0-9]/g, 
 // ============================================================
 // PDF GENERATION
 // ============================================================
+function firstFrameAspect(frames, fallback = 16/9) {
+  return new Promise(resolve => {
+    if (!frames || !frames.length) return resolve(fallback);
+    const img = new Image();
+    img.onload = () => {
+      const a = img.naturalWidth / img.naturalHeight;
+      resolve(isFinite(a) && a > 0 ? a : fallback);
+    };
+    img.onerror = () => resolve(fallback);
+    img.src = frames[0];
+  });
+}
+
 async function buildPdf() {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
@@ -1232,17 +1245,18 @@ async function buildPdf() {
 
   let fy = 70;
   const frameW = (W - 2*M - 12) / 2;
-  const frameH = frameW * 9/16;
+  const extAspect = await firstFrameAspect(state.exteriorFrames);
+  const extFrameH = frameW / extAspect;
   state.exteriorFrames.forEach((f, i) => {
     const col = i % 2;
     const row = Math.floor(i / 2);
     const fx = M + col * (frameW + 12);
-    const fyy = fy + row * (frameH + 12);
-    if (fyy + frameH > H - M) return;
-    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, frameH); } catch {}
+    const fyy = fy + row * (extFrameH + 12);
+    if (fyy + extFrameH > H - M) return;
+    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, extFrameH); } catch {}
     doc.setDrawColor(255, 212, 0);
     doc.setLineWidth(0.5);
-    doc.rect(fx, fyy, frameW, frameH);
+    doc.rect(fx, fyy, frameW, extFrameH);
   });
 
   doc.addPage();
@@ -1254,16 +1268,18 @@ async function buildPdf() {
   doc.text('SAMPLED FRAMES — INTERIOR', M, 32);
 
   fy = 70;
+  const intAspect = await firstFrameAspect(state.interiorFrames);
+  const intFrameH = frameW / intAspect;
   state.interiorFrames.forEach((f, i) => {
     const col = i % 2;
     const row = Math.floor(i / 2);
     const fx = M + col * (frameW + 12);
-    const fyy = fy + row * (frameH + 12);
-    if (fyy + frameH > H - M) return;
-    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, frameH); } catch {}
+    const fyy = fy + row * (intFrameH + 12);
+    if (fyy + intFrameH > H - M) return;
+    try { doc.addImage(f, 'JPEG', fx, fyy, frameW, intFrameH); } catch {}
     doc.setDrawColor(255, 212, 0);
     doc.setLineWidth(0.5);
-    doc.rect(fx, fyy, frameW, frameH);
+    doc.rect(fx, fyy, frameW, intFrameH);
   });
 
   // ---- FOOTER on every page ----
