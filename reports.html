@@ -181,7 +181,11 @@
 
   <div class="toolbar">
     <div class="count" id="count">Loading...</div>
-    <a href="/" class="btn">← New Inspection</a>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <span id="user-chip" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);"></span>
+      <button class="btn" id="refresh-btn" onclick="load()">↻ Refresh</button>
+      <a href="/" class="btn">← New Inspection</a>
+    </div>
   </div>
 
   <div id="container">
@@ -193,7 +197,15 @@
 async function load() {
   const container = document.getElementById('container');
   const countEl = document.getElementById('count');
+  const userChip = document.getElementById('user-chip');
   try {
+    const me = await fetch('/api/auth/me', { credentials: 'same-origin' });
+    if (me.ok) {
+      const j = await me.json();
+      userChip.textContent = 'Signed in as ' + j.username;
+    } else {
+      userChip.textContent = '';
+    }
     const r = await fetch('/api/reports', { credentials: 'same-origin' });
     if (r.status === 401) {
       countEl.innerHTML = '';
