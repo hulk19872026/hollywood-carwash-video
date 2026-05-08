@@ -633,8 +633,24 @@
   </div>
   <div class="filmstrip"></div>
 
+  <!-- ============ SCREEN: LOGIN ============ -->
+  <div class="screen active" id="screen-login">
+    <div class="panel" style="max-width:420px;margin:0 auto;">
+      <div class="panel-title"><span class="num">★</span> <span id="auth-title">Sign In</span></div>
+      <div id="auth-error" style="display:none;color:#fff;background:#5a1010;border:1px solid #8a2424;padding:10px 12px;border-radius:4px;font-size:13px;margin-bottom:12px;"></div>
+      <label for="auth-username">Username</label>
+      <input type="text" id="auth-username" autocomplete="username" autocapitalize="none" autocorrect="off" />
+      <label for="auth-password" style="margin-top:12px;">Password</label>
+      <input type="password" id="auth-password" autocomplete="current-password" />
+      <div class="btn-row">
+        <button class="btn btn-primary" id="auth-submit-btn" onclick="authSubmit()">Sign In</button>
+        <button class="btn btn-ghost" id="auth-toggle-btn" onclick="authToggle()">Need an account? Register</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ SCREEN: HOME ============ -->
-  <div class="screen active" id="screen-home">
+  <div class="screen" id="screen-home">
     <div class="home-hero">
       <h1 style="font-family:'Bungee',cursive;font-size:clamp(28px,5vw,44px);color:var(--white);line-height:1.1;">
         LIGHTS. CAMERA.<br/>
@@ -642,6 +658,10 @@
       </h1>
       <div class="stars">★ ★ ★</div>
       <p>Tap to start recording. AI scans for damage, reads the VIN, plate, make, model, and color, and files the report automatically.</p>
+      <div id="auth-chip" style="display:none;margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);">
+        Signed in as <span id="auth-username-chip" style="color:var(--yellow);font-weight:700;"></span>
+        · <a href="#" onclick="authLogout();return false;" style="color:var(--yellow);text-decoration:underline;">Sign out</a>
+      </div>
     </div>
     <div class="home-actions">
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
@@ -758,6 +778,86 @@ function show(name) {
   document.body.classList.toggle('recording-mode', name === 'record');
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
+
+// ============================================================
+// AUTH
+// ============================================================
+let _authMode = 'login';
+
+function setAuthError(msg) {
+  const el = document.getElementById('auth-error');
+  if (!el) return;
+  if (msg) { el.textContent = msg; el.style.display = 'block'; }
+  else { el.textContent = ''; el.style.display = 'none'; }
+}
+
+function authToggle() {
+  _authMode = _authMode === 'login' ? 'register' : 'login';
+  document.getElementById('auth-title').textContent = _authMode === 'login' ? 'Sign In' : 'Create Account';
+  document.getElementById('auth-submit-btn').textContent = _authMode === 'login' ? 'Sign In' : 'Register';
+  document.getElementById('auth-toggle-btn').textContent = _authMode === 'login' ? 'Need an account? Register' : 'Have an account? Sign in';
+  document.getElementById('auth-password').autocomplete = _authMode === 'login' ? 'current-password' : 'new-password';
+  setAuthError('');
+}
+
+async function authSubmit() {
+  const username = document.getElementById('auth-username').value.trim();
+  const password = document.getElementById('auth-password').value;
+  if (!username || !password) { setAuthError('Username and password are required.'); return; }
+  const btn = document.getElementById('auth-submit-btn');
+  btn.disabled = true;
+  setAuthError('');
+  try {
+    const r = await fetch('/api/auth/' + _authMode, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ username, password }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      setAuthError(j.message || j.error || ('Request failed: ' + r.status));
+      return;
+    }
+    document.getElementById('auth-password').value = '';
+    enterAuthedUI(j.username);
+  } catch (e) {
+    setAuthError('Network error: ' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function authLogout() {
+  try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch {}
+  // Hard reload to drop in-flight inspections and reset state.
+  window.location.href = '/';
+}
+
+function enterAuthedUI(username) {
+  const chip = document.getElementById('auth-chip');
+  const u = document.getElementById('auth-username-chip');
+  if (u) u.textContent = username;
+  if (chip) chip.style.display = '';
+  show('home');
+}
+
+async function checkAuthOnLoad() {
+  try {
+    const r = await fetch('/api/auth/me', { credentials: 'same-origin' });
+    if (r.ok) {
+      const j = await r.json();
+      enterAuthedUI(j.username);
+    } else {
+      show('login');
+    }
+  } catch {
+    show('login');
+  }
+}
+
+// Run before any other inspection logic kicks off.
+checkAuthOnLoad();
 
 async function startInspection() {
   // AI fills the metadata from the video (VIN, make, model, color, plate).

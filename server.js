@@ -16,6 +16,7 @@
 // ============================================================
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   S3Client,
@@ -36,6 +37,14 @@ const MODEL           = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514
 const MAX_TOKENS      = parseInt(process.env.MAX_TOKENS || '1500', 10);
 const RETENTION_DAYS  = parseInt(process.env.RETENTION_DAYS || '30', 10);
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+const SESSION_TTL_MS  = 30 * 24 * 60 * 60 * 1000;
+const COOKIE_NAME     = 'hcw_sess';
+const SESSION_SECRET  = process.env.SESSION_SECRET || (() => {
+  const s = crypto.randomBytes(32).toString('hex');
+  console.warn('⚠️  SESSION_SECRET not set — generated an ephemeral secret. Sessions will be invalidated on every restart. Set SESSION_SECRET in env to make them persistent.');
+  return s;
+})();
 
 const R2_ACCOUNT_ID        = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID     = process.env.R2_ACCESS_KEY_ID;
@@ -106,10 +115,126 @@ function resolveKindMeta(kind, requestedMime) {
   return { suffix: base.suffix, contentType: m, ext };
 }
 
-function r2KeyFor(reportId, kind, meta) {
+function reportPrefix(username, reportId) {
+  return `reports/${username}/${reportId}/`;
+}
+
+function r2KeyFor(username, reportId, kind, meta) {
   const m = meta || FILE_KIND[kind];
   if (!m) return null;
-  return `reports/${reportId}/${reportId}${m.suffix}${m.ext}`;
+  return `${reportPrefix(username, reportId)}${reportId}${m.suffix}${m.ext}`;
+}
+
+// ============================================================
+//  Auth — username/password with scrypt + HMAC-signed session cookies.
+//  User records live at users/<username>.json in R2.
+// ============================================================
+const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{1,30}$/;
+
+function userKey(username) { return `users/${username}.json`; }
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 64);
+  return `scrypt:${salt.toString('base64')}:${hash.toString('base64')}`;
+}
+
+function verifyPassword(password, stored) {
+  if (typeof stored !== 'string') return false;
+  const parts = stored.split(':');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  let salt, expected;
+  try {
+    salt     = Buffer.from(parts[1], 'base64');
+    expected = Buffer.from(parts[2], 'base64');
+  } catch { return false; }
+  const actual = crypto.scryptSync(password, salt, expected.length);
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function signSession(username) {
+  const payload = JSON.stringify({ u: username, e: Date.now() + SESSION_TTL_MS });
+  const b64 = Buffer.from(payload).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest('hex');
+  return `${b64}.${sig}`;
+}
+
+function verifySession(token) {
+  if (typeof token !== 'string') return null;
+  const dot = token.indexOf('.');
+  if (dot < 1) return null;
+  const b64 = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  // Strict hex validation: Buffer.from(_, 'hex') silently truncates at the
+  // first non-hex character, which would otherwise let trailing junk through.
+  if (!/^[0-9a-f]{64}$/.test(sig)) return null;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest('hex');
+  const a = Buffer.from(sig, 'hex');
+  const b = Buffer.from(expected, 'hex');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  let payload;
+  try { payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8')); } catch { return null; }
+  if (typeof payload.u !== 'string' || typeof payload.e !== 'number' || payload.e < Date.now()) return null;
+  return { username: payload.u };
+}
+
+function parseCookies(req) {
+  const out = {};
+  const header = req.headers.cookie;
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+function setSessionCookie(req, res, token) {
+  res.cookie(COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: req.secure,
+    sameSite: 'lax',
+    maxAge: SESSION_TTL_MS,
+    path: '/',
+  });
+}
+
+function clearSessionCookie(res) {
+  res.clearCookie(COOKIE_NAME, { path: '/' });
+}
+
+function authedUser(req) {
+  return verifySession(parseCookies(req)[COOKIE_NAME]);
+}
+
+function requireAuth(req, res, next) {
+  const u = authedUser(req);
+  if (!u) return res.status(401).json({ error: 'unauthorized' });
+  req.user = u;
+  next();
+}
+
+async function readUser(username) {
+  if (!s3) return null;
+  try {
+    const got = await s3.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: userKey(username) }));
+    const text = await got.Body.transformToString('utf8');
+    return JSON.parse(text);
+  } catch (e) {
+    const code = e.$metadata?.httpStatusCode;
+    if (e.name === 'NoSuchKey' || code === 404) return null;
+    throw e;
+  }
+}
+
+async function writeUser(record) {
+  await s3.send(new PutObjectCommand({
+    Bucket:      R2_BUCKET,
+    Key:         userKey(record.username),
+    Body:        JSON.stringify(record, null, 2),
+    ContentType: 'application/json',
+  }));
 }
 
 // ============================================================
@@ -125,6 +250,64 @@ function noCache(res) {
 }
 app.get('/', (_req, res) => { noCache(res); res.sendFile(path.join(__dirname, 'index.html')); });
 app.get('/reports', (_req, res) => { noCache(res); res.sendFile(path.join(__dirname, 'reports.html')); });
+
+// ============================================================
+//  Auth routes
+// ============================================================
+app.post('/api/auth/register', async (req, res) => {
+  if (!requireR2(res)) return;
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'bad_request' });
+  }
+  const u = username.trim().toLowerCase();
+  if (!USERNAME_RE.test(u)) {
+    return res.status(400).json({ error: 'bad_username', message: 'Use 2-31 characters: letters, digits, dot, dash, underscore. Must start with a letter or digit.' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: 'weak_password', message: 'Password must be at least 6 characters.' });
+  }
+  try {
+    if (await readUser(u)) return res.status(409).json({ error: 'taken', message: 'That username is already registered.' });
+    await writeUser({ username: u, passwordHash: hashPassword(password), createdAt: new Date().toISOString() });
+    setSessionCookie(req, res, signSession(u));
+    res.json({ ok: true, username: u });
+  } catch (e) {
+    console.error('register failed:', e);
+    res.status(500).json({ error: 'register_failed', message: e.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  if (!requireR2(res)) return;
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'bad_request' });
+  }
+  const u = username.trim().toLowerCase();
+  try {
+    const user = await readUser(u);
+    if (!user || !verifyPassword(password, user.passwordHash)) {
+      return res.status(401).json({ error: 'invalid_credentials', message: 'Username or password is incorrect.' });
+    }
+    setSessionCookie(req, res, signSession(u));
+    res.json({ ok: true, username: u });
+  } catch (e) {
+    console.error('login failed:', e);
+    res.status(500).json({ error: 'login_failed', message: e.message });
+  }
+});
+
+app.post('/api/auth/logout', (_req, res) => {
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const u = authedUser(req);
+  if (!u) return res.status(401).json({ error: 'unauthorized' });
+  res.json({ username: u.username });
+});
 
 // ============================================================
 //  POST /api/analyze — Anthropic vision proxy
@@ -163,7 +346,7 @@ app.post('/api/analyze', async (req, res) => {
 //  Body: { reportId, files: ['pdf','exterior','interior'] }
 //  Returns presigned PUT URLs the client uploads to directly.
 // ============================================================
-app.post('/api/presign-upload', async (req, res) => {
+app.post('/api/presign-upload', requireAuth, async (req, res) => {
   if (!requireR2(res)) return;
   try {
     const { reportId, files, mimes } = req.body || {};
@@ -175,7 +358,7 @@ app.post('/api/presign-upload', async (req, res) => {
     for (const kind of files) {
       const meta = resolveKindMeta(kind, mimes && mimes[kind]);
       if (!meta) continue;
-      const key = r2KeyFor(id, kind, meta);
+      const key = r2KeyFor(req.user.username, id, kind, meta);
       const cmd = new PutObjectCommand({
         Bucket: R2_BUCKET,
         Key: key,
@@ -196,7 +379,7 @@ app.post('/api/presign-upload', async (req, res) => {
 //  Body: { reportId, metadata, uploadedKeys }
 //  Writes metadata.json into the report folder in R2.
 // ============================================================
-app.post('/api/finalize-report', async (req, res) => {
+app.post('/api/finalize-report', requireAuth, async (req, res) => {
   if (!requireR2(res)) return;
   try {
     const { reportId, metadata, uploadedKeys } = req.body || {};
@@ -207,16 +390,17 @@ app.post('/api/finalize-report', async (req, res) => {
     const body = JSON.stringify({
       ...metadata,
       reportId: id,
+      owner: req.user.username,
       uploadedKeys: uploadedKeys || {},
       finalizedAt: new Date().toISOString(),
     }, null, 2);
     await s3.send(new PutObjectCommand({
       Bucket: R2_BUCKET,
-      Key: `reports/${id}/metadata.json`,
+      Key: `${reportPrefix(req.user.username, id)}metadata.json`,
       Body: body,
       ContentType: 'application/json',
     }));
-    console.log(`✓ Finalized report ${id}`);
+    console.log(`✓ Finalized report ${id} for ${req.user.username}`);
     res.json({ ok: true, reportId: id });
   } catch (e) {
     console.error('finalize-report failed:', e);
@@ -227,26 +411,28 @@ app.post('/api/finalize-report', async (req, res) => {
 // ============================================================
 //  GET /api/reports — list saved inspections from R2
 // ============================================================
-app.get('/api/reports', async (_req, res) => {
+app.get('/api/reports', requireAuth, async (req, res) => {
   if (!requireR2(res)) return;
   try {
+    const userPrefix = `reports/${req.user.username}/`;
     const top = await s3.send(new ListObjectsV2Command({
       Bucket: R2_BUCKET,
-      Prefix: 'reports/',
+      Prefix: userPrefix,
       Delimiter: '/',
     }));
     const ids = (top.CommonPrefixes || [])
-      .map(p => p.Prefix.replace(/^reports\//, '').replace(/\/$/, ''))
+      .map(p => p.Prefix.replace(userPrefix, '').replace(/\/$/, ''))
       .filter(Boolean);
 
     const reports = [];
     for (const id of ids) {
+      const folder = `${userPrefix}${id}/`;
       let metadata = null;
       let createdAt = null;
       try {
         const got = await s3.send(new GetObjectCommand({
           Bucket: R2_BUCKET,
-          Key: `reports/${id}/metadata.json`,
+          Key: `${folder}metadata.json`,
         }));
         const text = await got.Body.transformToString('utf8');
         metadata = JSON.parse(text);
@@ -257,10 +443,10 @@ app.get('/api/reports', async (_req, res) => {
       try {
         const inner = await s3.send(new ListObjectsV2Command({
           Bucket: R2_BUCKET,
-          Prefix: `reports/${id}/`,
+          Prefix: folder,
         }));
         files = (inner.Contents || [])
-          .map(c => c.Key.slice(`reports/${id}/`.length))
+          .map(c => c.Key.slice(folder.length))
           .filter(f => f && f !== 'metadata.json');
         if (!createdAt) {
           const newest = (inner.Contents || [])
@@ -286,14 +472,14 @@ app.get('/api/reports', async (_req, res) => {
 //  GET /api/reports/:id/:file
 //  Redirects to a short-lived presigned R2 GET URL.
 // ============================================================
-app.get('/api/reports/:id/:file', async (req, res) => {
+app.get('/api/reports/:id/:file', requireAuth, async (req, res) => {
   if (!requireR2(res)) return;
   try {
     const id   = sanitize(req.params.id);
     const file = sanitize(req.params.file);
     const url  = await getSignedUrl(s3, new GetObjectCommand({
       Bucket: R2_BUCKET,
-      Key: `reports/${id}/${file}`,
+      Key: `${reportPrefix(req.user.username, id)}${file}`,
     }), { expiresIn: 600 });
     res.redirect(302, url);
   } catch (e) {
@@ -305,6 +491,42 @@ app.get('/api/reports/:id/:file', async (req, res) => {
 // ============================================================
 //  Retention sweep — delete report folders older than RETENTION_DAYS
 // ============================================================
+async function pruneFolder(folderPrefix, cutoff) {
+  const inner = await s3.send(new ListObjectsV2Command({
+    Bucket: R2_BUCKET,
+    Prefix: folderPrefix,
+  }));
+  const contents = inner.Contents || [];
+  if (!contents.length) return { deleted: false, count: 0 };
+
+  let folderTime = null;
+  const metaObj = contents.find(c => c.Key.endsWith('/metadata.json'));
+  if (metaObj) {
+    try {
+      const got = await s3.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: metaObj.Key }));
+      const text = await got.Body.transformToString('utf8');
+      const j = JSON.parse(text);
+      const ts = j.timestamp || j.finalizedAt;
+      if (ts) folderTime = Date.parse(ts);
+    } catch {}
+  }
+  if (!folderTime) {
+    const newest = contents.map(c => c.LastModified ? +new Date(c.LastModified) : 0).sort((a, b) => b - a)[0];
+    folderTime = newest || null;
+  }
+  if (!folderTime || folderTime > cutoff) return { deleted: false, count: 0 };
+
+  const result = await s3.send(new DeleteObjectsCommand({
+    Bucket: R2_BUCKET,
+    Delete: { Objects: contents.map(c => ({ Key: c.Key })), Quiet: true },
+  }));
+  if (result.Errors && result.Errors.length) {
+    console.error(`prune ${folderPrefix} partial errors:`, result.Errors);
+  }
+  console.log(`✓ Pruned ${folderPrefix} (${contents.length} objects)`);
+  return { deleted: true, count: contents.length };
+}
+
 async function pruneOldReports() {
   if (!R2_READY) return;
   const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -316,53 +538,30 @@ async function pruneOldReports() {
       Prefix: 'reports/',
       Delimiter: '/',
     }));
-    const ids = (top.CommonPrefixes || [])
-      .map(p => p.Prefix.replace(/^reports\//, '').replace(/\/$/, ''))
-      .filter(Boolean);
+    const folders = (top.CommonPrefixes || []).map(p => p.Prefix);
 
-    for (const id of ids) {
+    for (const folder of folders) {
       try {
-        const inner = await s3.send(new ListObjectsV2Command({
+        // Detect new format (reports/<user>/<id>/) vs legacy (reports/<id>/)
+        // by looking one level deeper for sub-folders.
+        const sub = await s3.send(new ListObjectsV2Command({
           Bucket: R2_BUCKET,
-          Prefix: `reports/${id}/`,
+          Prefix: folder,
+          Delimiter: '/',
         }));
-        const contents = inner.Contents || [];
-        if (!contents.length) continue;
+        const subfolders = (sub.CommonPrefixes || []).map(p => p.Prefix);
+        const targets = subfolders.length ? subfolders : [folder];
 
-        let folderTime = null;
-        const metaObj = contents.find(c => c.Key.endsWith('/metadata.json'));
-        if (metaObj) {
+        for (const target of targets) {
           try {
-            const got = await s3.send(new GetObjectCommand({
-              Bucket: R2_BUCKET,
-              Key: metaObj.Key,
-            }));
-            const text = await got.Body.transformToString('utf8');
-            const j = JSON.parse(text);
-            const ts = j.timestamp || j.finalizedAt;
-            if (ts) folderTime = Date.parse(ts);
-          } catch {}
+            const r = await pruneFolder(target, cutoff);
+            if (r.deleted) { deletedFolders++; deletedObjects += r.count; }
+          } catch (e) {
+            console.error(`prune ${target} failed:`, e.message);
+          }
         }
-        if (!folderTime) {
-          const newest = contents
-            .map(c => c.LastModified ? +new Date(c.LastModified) : 0)
-            .sort((a, b) => b - a)[0];
-          folderTime = newest || null;
-        }
-        if (!folderTime || folderTime > cutoff) continue;
-
-        const result = await s3.send(new DeleteObjectsCommand({
-          Bucket: R2_BUCKET,
-          Delete: { Objects: contents.map(c => ({ Key: c.Key })), Quiet: true },
-        }));
-        if (result.Errors && result.Errors.length) {
-          console.error(`prune ${id} partial errors:`, result.Errors);
-        }
-        deletedFolders++;
-        deletedObjects += contents.length;
-        console.log(`✓ Pruned report ${id} (${contents.length} objects)`);
       } catch (e) {
-        console.error(`prune ${id} failed:`, e.message);
+        console.error(`prune scan ${folder} failed:`, e.message);
       }
     }
     if (deletedFolders) {
