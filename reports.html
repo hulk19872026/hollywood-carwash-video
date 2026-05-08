@@ -194,7 +194,17 @@ async function load() {
   const container = document.getElementById('container');
   const countEl = document.getElementById('count');
   try {
-    const r = await fetch('/api/reports');
+    const r = await fetch('/api/reports', { credentials: 'same-origin' });
+    if (r.status === 401) {
+      countEl.innerHTML = '';
+      container.innerHTML = `
+        <div class="empty">
+          <h3>SIGN IN REQUIRED</h3>
+          <p>You need to sign in before you can view your reports.</p>
+          <p style="margin-top:16px;"><a class="btn" href="/">← Go sign in</a></p>
+        </div>`;
+      return;
+    }
     const data = await r.json();
     countEl.innerHTML = '<strong>' + data.count + '</strong> reports on file';
 
