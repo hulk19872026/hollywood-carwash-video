@@ -212,6 +212,8 @@ async function load() {
       const ext = (meta.analysis && meta.analysis.exterior) || {};
       const intA = (meta.analysis && meta.analysis.interior) || {};
       const plate = ext.license_plate || {};
+      const vehicle = ext.vehicle || {};
+      const modelLine = [vehicle.year, vehicle.model || vehicle.make_model].filter(Boolean).join(' ');
       const damage = (ext.damage || []).length;
       const issues = (intA.issues || []).length;
       const totalFlags = damage + issues;
@@ -222,9 +224,10 @@ async function load() {
           <div class="report-id">${escape(r.id)}</div>
           <div class="report-when">${date.toLocaleString()}</div>
           <div class="report-meta">
-            <div class="row"><span class="label">Tech</span><span class="val">${escape(meta.tech || '—')}</span></div>
-            <div class="row"><span class="label">Customer</span><span class="val">${escape(meta.customer || '—')}</span></div>
-            <div class="row"><span class="label">Bay</span><span class="val">${escape(meta.bay || '—')}</span></div>
+            <div class="row"><span class="label">VIN</span><span class="val">${escape(vehicle.vin || 'NOT READ')}</span></div>
+            <div class="row"><span class="label">Make</span><span class="val">${escape(vehicle.make || '—')}</span></div>
+            <div class="row"><span class="label">Model</span><span class="val">${escape(modelLine || '—')}</span></div>
+            <div class="row"><span class="label">Color</span><span class="val">${escape(vehicle.color || '—')}</span></div>
             <div class="row"><span class="label">Plate</span><span class="val">${escape(plate.number || 'NOT READ')}${plate.state ? ' / ' + escape(plate.state) : ''}</span></div>
             <div class="row"><span class="label">Findings</span><span class="val">
               ${totalFlags === 0
