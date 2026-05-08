@@ -667,6 +667,7 @@
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
       <a class="btn btn-ghost" href="/reports" target="_blank" style="text-decoration:none;">📋 VIEW REPORTS</a>
     </div>
+    <div id="upload-status" style="display:none;margin-top:18px;padding:14px 16px;border-radius:6px;background:#102a3a;border:1px solid #1f4a66;font-size:13px;font-family:'JetBrains Mono',monospace;color:#fff;"></div>
   </div>
 
   <!-- ============ SCREEN: RECORDING ============ -->
@@ -842,9 +843,17 @@ function enterAuthedUI(username) {
   _authExpiredNotified = false;
   show('home');
   // Resume any uploads that stalled while the session was missing.
-  if (typeof processQueue === 'function') {
-    processQueue().catch(() => {});
-  }
+  if (typeof processQueue === 'function') processQueue().catch(() => {});
+  if (typeof updateQueueBadge === 'function') updateQueueBadge();
+  startQueueWatch();
+}
+
+let _queueWatch = null;
+function startQueueWatch() {
+  if (_queueWatch) return;
+  _queueWatch = setInterval(() => {
+    if (typeof updateQueueBadge === 'function') updateQueueBadge().catch(() => {});
+  }, 2000);
 }
 
 async function checkAuthOnLoad() {
@@ -1953,18 +1962,50 @@ function handleAuthExpired() {
 
 async function updateQueueBadge() {
   const el = document.getElementById('q-badge');
-  if (!el) return;
+  const panel = document.getElementById('upload-status');
   const jobs = await qAll().catch(() => []);
-  if (!jobs.length) { el.style.display = 'none'; return; }
+  if (!jobs.length) {
+    if (el)    el.style.display = 'none';
+    if (panel) panel.style.display = 'none';
+    return;
+  }
   const failed    = jobs.filter(j => j.status === 'failed').length;
   const uploading = jobs.filter(j => j.status === 'uploading').length;
   const pending   = jobs.length - uploading - failed;
-  el.style.display = 'flex';
-  let label = `📤 ${jobs.length} upload${jobs.length === 1 ? '' : 's'}`;
-  if (uploading) label += ` · ${uploading} sending`;
-  if (failed)    label += ` · ${failed} failed`;
-  el.textContent = label;
-  el.style.background = failed ? '#5a1010' : (uploading ? '#3a3a10' : '#102a3a');
+
+  if (el) {
+    el.style.display = 'flex';
+    let label = `📤 ${jobs.length} upload${jobs.length === 1 ? '' : 's'}`;
+    if (uploading) label += ` · ${uploading} sending`;
+    if (failed)    label += ` · ${failed} failed`;
+    el.textContent = label;
+    el.style.background = failed ? '#5a1010' : (uploading ? '#3a3a10' : '#102a3a');
+  }
+
+  if (panel) {
+    const totalBytes = jobs.reduce((sum, j) => sum + Object.values(j.files || {}).reduce((s, b) => s + (b?.size || 0), 0), 0);
+    const items = jobs.map(j => {
+      const sizes = Object.entries(j.files || {})
+        .map(([k, b]) => `${k} ${formatBytes(b?.size || 0)}`).join(' + ');
+      const statusLabel = j.status === 'uploading' ? '⏳ sending'
+                        : j.status === 'failed'    ? '⚠ failed'
+                        : '… queued';
+      const err = j.lastError ? `<div style="color:#ff9a9a;margin-top:4px;font-size:11px;word-break:break-word;">${escapeHtml(j.lastError)}</div>` : '';
+      return `<div style="border-top:1px solid #1f4a66;padding:8px 0;">
+        <div><strong>${escapeHtml(j.reportId)}</strong> · ${statusLabel} · ${escapeHtml(sizes)} · attempts: ${j.attempts || 0}</div>
+        ${err}
+      </div>`;
+    }).join('');
+    panel.style.display = '';
+    panel.style.background = failed ? '#3a1414' : (uploading ? '#3a3a10' : '#102a3a');
+    panel.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span><strong>Pending uploads:</strong> ${jobs.length} · ${formatBytes(totalBytes)}</span>
+        <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="processQueue().catch(()=>{});updateQueueBadge();">↻ Retry</button>
+      </div>
+      ${items}
+    `;
+  }
 }
 
 async function showQueueDetails() {
