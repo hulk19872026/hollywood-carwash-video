@@ -641,7 +641,7 @@
         <span style="color:var(--red);">INSPECTION.</span>
       </h1>
       <div class="stars">★ ★ ★</div>
-      <p>Tap to start recording. AI scans for damage, reads the plate, and files the report automatically.</p>
+      <p>Tap to start recording. AI scans for damage, reads the VIN, plate, make, model, and color, and files the report automatically.</p>
     </div>
     <div class="home-actions">
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
@@ -685,7 +685,7 @@
       <ul class="status-list" id="status-list">
         <li class="pending" data-step="frames">Extracting key frames from video</li>
         <li class="pending" data-step="exterior">Scanning exterior for damage</li>
-        <li class="pending" data-step="plate">Reading license plate</li>
+        <li class="pending" data-step="plate">Reading VIN, plate &amp; vehicle info</li>
         <li class="pending" data-step="interior">Scanning interior condition</li>
         <li class="pending" data-step="pdf">Generating PDF report</li>
         <li class="pending" data-step="save">Saving to folder</li>
@@ -734,7 +734,6 @@
 // STATE
 // ============================================================
 const state = {
-  tech: '', customer: '', make: '', color: '', bay: '', serviceType: 'Inspection',
   videoBlob: null,
   videoMime: '',
   exteriorFrames: [],
@@ -761,9 +760,7 @@ function show(name) {
 }
 
 async function startInspection() {
-  // Default unfilled metadata; AI fills in what it can from the video.
-  state.tech = state.customer = state.make = state.color = state.bay = '';
-  state.serviceType = 'Inspection';
+  // AI fills the metadata from the video (VIN, make, model, color, plate).
   state.videoBlob = null;
   state.videoMime = '';
 
@@ -1164,8 +1161,11 @@ Respond ONLY with valid JSON, no preamble, no markdown fences. Use this exact sc
     "notes": "any relevant context (e.g. partial read, plate frame branding)"
   },
   "vehicle": {
-    "make_model": "best guess or null",
-    "color": "color or null",
+    "vin": "17-character VIN string if visible, otherwise null. Look at the lower-left corner of the windshield (dashboard VIN plate), the driver-side door jamb sticker, and any visible registration document. Return only when you can read it confidently; otherwise null.",
+    "make":  "manufacturer (e.g. 'Toyota', 'Ford') or null",
+    "model": "model name (e.g. 'Camry', 'F-150') or null",
+    "year":  "four-digit year as a string, or null",
+    "color": "primary exterior color, or null",
     "body_style": "sedan|suv|truck|coupe|hatchback|van|other or null"
   },
   "damage": [
@@ -1180,7 +1180,7 @@ Respond ONLY with valid JSON, no preamble, no markdown fences. Use this exact sc
   "summary": "one short sentence overall"
 }
 
-If no visible damage, return an empty array for "damage". Be conservative — only flag what is clearly visible. Glare, water beads, or shadow are NOT damage.`;
+If no visible damage, return an empty array for "damage". Be conservative — only flag what is clearly visible. Glare, water beads, or shadow are NOT damage. Only return a VIN when you can read all 17 characters; partial reads should be null.`;
 
 const INTERIOR_PROMPT = `You are inspecting frames from a car wash interior video. The frames show the INSIDE of a vehicle.
 
@@ -1405,14 +1405,13 @@ async function buildPdf() {
   const plate = ext.license_plate || {};
   const vehicle = ext.vehicle || {};
   const meta = [
-    ['DATE',         dateStr + '   ' + timeStr],
-    ['TECHNICIAN',   state.tech || '—'],
-    ['CUSTOMER',     state.customer || '—'],
-    ['BAY / STALL',  state.bay || '—'],
-    ['SERVICE',      state.serviceType || '—'],
-    ['VEHICLE',      [state.color || vehicle.color, state.make || vehicle.make_model].filter(Boolean).join(' ') || '—'],
-    ['PLATE',        (plate.number ? plate.number + (plate.state ? ' (' + plate.state + ')' : '') : 'NOT READ')
-                     + (plate.confidence ? '  [conf: ' + plate.confidence + ']' : '')],
+    ['DATE',   dateStr + '   ' + timeStr],
+    ['VIN',    vehicle.vin || 'NOT READ'],
+    ['MAKE',   vehicle.make  || '—'],
+    ['MODEL',  [vehicle.year, vehicle.model || vehicle.make_model].filter(Boolean).join(' ') || '—'],
+    ['COLOR',  vehicle.color || '—'],
+    ['PLATE',  (plate.number ? plate.number + (plate.state ? ' (' + plate.state + ')' : '') : 'NOT READ')
+               + (plate.confidence ? '  [conf: ' + plate.confidence + ']' : '')],
   ];
   let my = y + 18;
   meta.forEach(([k, v]) => {
@@ -1925,11 +1924,13 @@ function renderReport(saveResult) {
 
   // Summary box
   const summary = document.getElementById('report-summary');
+  const modelLine = [vehicle.year, vehicle.model || vehicle.make_model].filter(Boolean).join(' ');
   summary.innerHTML = `
     <div class="summary-row"><span class="summary-label">Report ID</span><span class="summary-val">${escapeHtml(state.reportName)}</span></div>
-    <div class="summary-row"><span class="summary-label">Technician</span><span class="summary-val">${escapeHtml(state.tech || '—')}</span></div>
-    <div class="summary-row"><span class="summary-label">Customer</span><span class="summary-val">${escapeHtml(state.customer || '—')}</span></div>
-    <div class="summary-row"><span class="summary-label">Vehicle</span><span class="summary-val">${escapeHtml([state.color || vehicle.color, state.make || vehicle.make_model].filter(Boolean).join(' ') || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">VIN</span><span class="summary-val">${escapeHtml(vehicle.vin || 'NOT READ')}</span></div>
+    <div class="summary-row"><span class="summary-label">Make</span><span class="summary-val">${escapeHtml(vehicle.make || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">Model</span><span class="summary-val">${escapeHtml(modelLine || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">Color</span><span class="summary-val">${escapeHtml(vehicle.color || '—')}</span></div>
     <div class="summary-row"><span class="summary-label">License Plate</span><span class="summary-val">${escapeHtml(plate.number ? plate.number + (plate.state ? ' / ' + plate.state : '') : 'NOT READ')}${plate.confidence ? ' <span style="color:#888;">(' + plate.confidence + ')</span>' : ''}</span></div>
     <div class="summary-row"><span class="summary-label">Exterior</span><span class="summary-val">${escapeHtml((ext.overall_condition || '—').toUpperCase())}</span></div>
     <div class="summary-row"><span class="summary-label">Interior</span><span class="summary-val">${escapeHtml((intA.overall_condition || '—').toUpperCase())}</span></div>
@@ -1986,8 +1987,6 @@ function escapeHtml(s) {
 // RESET
 // ============================================================
 function resetApp() {
-  state.tech = state.customer = state.make = state.color = state.bay = '';
-  state.serviceType = 'Inspection';
   state.videoBlob = null;
   state.videoMime = '';
   state.exteriorFrames = []; state.interiorFrames = [];
