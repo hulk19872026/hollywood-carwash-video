@@ -839,7 +839,12 @@ function enterAuthedUI(username) {
   const u = document.getElementById('auth-username-chip');
   if (u) u.textContent = username;
   if (chip) chip.style.display = '';
+  _authExpiredNotified = false;
   show('home');
+  // Resume any uploads that stalled while the session was missing.
+  if (typeof processQueue === 'function') {
+    processQueue().catch(() => {});
+  }
 }
 
 async function checkAuthOnLoad() {
@@ -1818,6 +1823,9 @@ function xhrPostJson(url, bodyObj, timeoutMs) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url, true);
+    // Same-origin XHR should send cookies by default, but iOS Safari ITP
+    // and some content-blocker extensions are inconsistent. Be explicit.
+    xhr.withCredentials = true;
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.setRequestHeader('Accept', 'application/json');
@@ -1868,6 +1876,10 @@ async function uploadJob(job) {
     } catch (e) {
       throw new Error(`presign-upload ${e.name === 'TimeoutError' ? 'timed out' : 'failed: ' + (e.message || e)}`);
     }
+    if (r.status === 401) {
+      handleAuthExpired();
+      throw new Error('presign-upload 401 — session expired. Sign in again and the upload will resume automatically.');
+    }
     if (r.status < 200 || r.status >= 300) {
       throw new Error('presign-upload ' + r.status + (r.body ? ' — ' + r.body.slice(0, 200) : ''));
     }
@@ -1915,11 +1927,28 @@ async function uploadJob(job) {
   } catch (e) {
     throw new Error(`finalize-report ${e.name === 'TimeoutError' ? 'timed out' : 'failed: ' + (e.message || e)}`);
   }
+  if (fin.status === 401) {
+    handleAuthExpired();
+    throw new Error('finalize-report 401 — session expired. Sign in again and the upload will resume automatically.');
+  }
   if (fin.status < 200 || fin.status >= 300) {
     throw new Error('finalize-report ' + fin.status + (fin.body ? ' — ' + fin.body.slice(0, 200) : ''));
   }
 
   await qDel(job.reportId);
+}
+
+let _authExpiredNotified = false;
+function handleAuthExpired() {
+  if (_authExpiredNotified) return;
+  _authExpiredNotified = true;
+  // Reset the in-memory auth chip so the user knows.
+  const chip = document.getElementById('auth-chip');
+  if (chip) chip.style.display = 'none';
+  setTimeout(() => {
+    alert('Your session has expired. Please sign in again — your inspection is saved and will finish uploading once you do.');
+    show('login');
+  }, 0);
 }
 
 async function updateQueueBadge() {
