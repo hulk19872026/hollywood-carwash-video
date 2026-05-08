@@ -309,6 +309,35 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ username: u.username });
 });
 
+// Diagnostic endpoint — reports what the server sees for the current cookie
+// and how many objects exist under reports/<username>/. No filesystem access,
+// no cross-user data; safe to expose to logged-in users debugging their own
+// state.
+app.get('/api/auth/whoami', requireAuth, async (req, res) => {
+  if (!requireR2(res)) return;
+  const userPrefix = `reports/${req.user.username}/`;
+  let folderCount = 0;
+  let objectCount = 0;
+  try {
+    const top = await s3.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET, Prefix: userPrefix, Delimiter: '/',
+    }));
+    folderCount = (top.CommonPrefixes || []).length;
+    const all = await s3.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET, Prefix: userPrefix,
+    }));
+    objectCount = (all.Contents || []).length;
+  } catch (e) {
+    return res.json({ username: req.user.username, prefix: userPrefix, error: e.message });
+  }
+  res.json({
+    username:    req.user.username,
+    prefix:      userPrefix,
+    reportFolders: folderCount,
+    objectCount,
+  });
+});
+
 // ============================================================
 //  POST /api/analyze — Anthropic vision proxy
 // ============================================================
@@ -415,6 +444,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
   if (!requireR2(res)) return;
   try {
     const userPrefix = `reports/${req.user.username}/`;
+    console.log(`list reports for ${req.user.username} (prefix=${userPrefix})`);
     const top = await s3.send(new ListObjectsV2Command({
       Bucket: R2_BUCKET,
       Prefix: userPrefix,
@@ -461,6 +491,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
     }
 
     reports.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    console.log(`  -> ${reports.length} reports for ${req.user.username}`);
     res.json({ reports, count: reports.length });
   } catch (e) {
     console.error('list reports failed:', e);
