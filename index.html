@@ -1282,8 +1282,15 @@ async function processInspection(videoBlob) {
   const ts = now.getFullYear() + pad2(now.getMonth()+1) + pad2(now.getDate()) + '-' + pad2(now.getHours()) + pad2(now.getMinutes()) + pad2(now.getSeconds());
   state.reportName = plate ? `HCW-${plate}-${ts}` : `HCW-${ts}`;
 
-  const pdfBlob = await buildPdf();
-  state.pdfBlob = pdfBlob;
+  let pdfBlob = null;
+  try {
+    pdfBlob = await buildPdf();
+    state.pdfBlob = pdfBlob;
+  } catch (e) {
+    // PDF rendering must never block the upload — the video is the
+    // source of truth and has to reach R2 either way.
+    console.error('buildPdf failed; uploading video without PDF:', e);
+  }
   await saveToFolder(pdfBlob);
 }
 
@@ -1305,54 +1312,65 @@ function drawFrameSectionHeader(doc, title, W, M) {
 async function renderFrameSection(doc, title, frames, geom) {
   const { W, H, M } = geom;
   if (!frames || !frames.length) return;
-  const aspect = await firstFrameAspect(frames);
-  const gap = 16;
-  const headerH = 50;
-  const footerReserve = 40;
-  const topY = headerH + 20;
-  const bottomLimit = H - footerReserve;
-  const maxW = W - 2*M;
-  const maxH = bottomLimit - topY;
+  try {
+    const aspect = await firstFrameAspect(frames);
+    const gap = 16;
+    const headerH = 50;
+    const footerReserve = 40;
+    const topY = headerH + 20;
+    const bottomLimit = H - footerReserve;
+    const maxW = W - 2*M;
+    const maxH = bottomLimit - topY;
 
-  // Fit the image into the available page area while preserving aspect.
-  let drawW = maxW;
-  let drawH = drawW / aspect;
-  if (drawH > maxH) {
-    drawH = maxH;
-    drawW = drawH * aspect;
-  }
-  const drawX = (W - drawW) / 2;
-
-  doc.addPage();
-  drawFrameSectionHeader(doc, title, W, M);
-  let fy = topY;
-  let isFirstOnPage = true;
-
-  for (const f of frames) {
-    if (!isFirstOnPage && fy + drawH > bottomLimit) {
-      doc.addPage();
-      drawFrameSectionHeader(doc, title + ' (cont.)', W, M);
-      fy = topY;
-      isFirstOnPage = true;
+    // Fit the image into the available page area while preserving aspect.
+    let drawW = maxW;
+    let drawH = drawW / aspect;
+    if (drawH > maxH) {
+      drawH = maxH;
+      drawW = drawH * aspect;
     }
-    try { doc.addImage(f, 'JPEG', drawX, fy, drawW, drawH); } catch {}
-    doc.setDrawColor(255, 212, 0);
-    doc.setLineWidth(0.5);
-    doc.rect(drawX, fy, drawW, drawH);
-    fy += drawH + gap;
-    isFirstOnPage = false;
+    const drawX = (W - drawW) / 2;
+
+    doc.addPage();
+    drawFrameSectionHeader(doc, title, W, M);
+    let fy = topY;
+    let isFirstOnPage = true;
+
+    for (const f of frames) {
+      if (!isFirstOnPage && fy + drawH > bottomLimit) {
+        doc.addPage();
+        drawFrameSectionHeader(doc, title + ' (cont.)', W, M);
+        fy = topY;
+        isFirstOnPage = true;
+      }
+      try { doc.addImage(f, 'JPEG', drawX, fy, drawW, drawH); } catch {}
+      doc.setDrawColor(255, 212, 0);
+      doc.setLineWidth(0.5);
+      doc.rect(drawX, fy, drawW, drawH);
+      fy += drawH + gap;
+      isFirstOnPage = false;
+    }
+  } catch (e) {
+    // The appendix is nice-to-have; never let a frame layout error abort
+    // the whole PDF (and therefore the upload).
+    console.warn('renderFrameSection failed for', title, e);
   }
 }
 
 function firstFrameAspect(frames, fallback = 16/9) {
   return new Promise(resolve => {
     if (!frames || !frames.length) return resolve(fallback);
+    let done = false;
+    const finish = (a) => { if (done) return; done = true; resolve(a); };
     const img = new Image();
     img.onload = () => {
       const a = img.naturalWidth / img.naturalHeight;
-      resolve(isFinite(a) && a > 0 ? a : fallback);
+      finish(isFinite(a) && a > 0 ? a : fallback);
     };
-    img.onerror = () => resolve(fallback);
+    img.onerror = () => finish(fallback);
+    // iOS Safari can silently drop image-decode events for large data URLs;
+    // never let this hang the PDF (and therefore the upload queue).
+    setTimeout(() => finish(fallback), 3000);
     img.src = frames[0];
   });
 }
@@ -1876,11 +1894,11 @@ async function saveToFolder(pdfBlob) {
   }
 
   const vidExt = extForMime(state.videoMime || (state.videoBlob && state.videoBlob.type));
-  triggerDownload(pdfBlob, baseName + '.pdf');
+  if (pdfBlob) triggerDownload(pdfBlob, baseName + '.pdf');
   if (state.videoBlob) triggerDownload(state.videoBlob, baseName + vidExt);
   result.saved = true;
   result.location = 'Downloads folder';
-  result.filenames = [baseName + '.pdf'];
+  result.filenames = pdfBlob ? [baseName + '.pdf'] : [];
   if (state.videoBlob) result.filenames.push(baseName + vidExt);
   return result;
 }
