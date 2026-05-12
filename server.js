@@ -412,35 +412,51 @@ app.post('/api/presign-upload', requireAuth, async (req, res) => {
 
 // ============================================================
 //  PUT /api/proxy-upload/:reportId/:kind
-//  Streams the request body straight to R2 under the caller's user
-//  prefix. Same-origin, so no R2 CORS preflight is involved.
+//  Buffers the request body in memory and PUTs it to R2 under the
+//  caller's user prefix. Same-origin so no R2 CORS preflight; buffering
+//  (vs streaming req directly into the SDK) sidesteps backpressure
+//  weirdness with http.IncomingMessage on some Node + SDK combos.
 // ============================================================
-app.put('/api/proxy-upload/:reportId/:kind', requireAuth, async (req, res) => {
-  if (!requireR2(res)) return;
-  try {
+app.put(
+  '/api/proxy-upload/:reportId/:kind',
+  requireAuth,
+  express.raw({ type: '*/*', limit: '200mb' }),
+  async (req, res) => {
+    if (!requireR2(res)) return;
+    const started = Date.now();
     const id   = sanitize(req.params.reportId);
     const kind = String(req.params.kind || '');
-    const mime = req.headers['content-type'];
-    const meta = resolveKindMeta(kind, mime);
-    if (!meta) return res.status(400).json({ error: 'bad_kind', message: `unknown kind: ${kind}` });
-    const contentLength = parseInt(req.headers['content-length'] || '0', 10);
-    if (!contentLength) {
-      return res.status(411).json({ error: 'length_required', message: 'Content-Length header required' });
+    const mime = req.headers['content-type'] || '';
+    const ua   = (req.headers['user-agent'] || '').slice(0, 60);
+    try {
+      const meta = resolveKindMeta(kind, mime);
+      if (!meta) {
+        console.warn(`proxy-upload: bad kind=${kind} mime=${mime}`);
+        return res.status(400).json({ error: 'bad_kind', message: `unknown kind: ${kind}` });
+      }
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        console.warn(`proxy-upload: empty body for ${id}/${kind} (ua=${ua})`);
+        return res.status(400).json({ error: 'empty_body', message: 'request body was empty' });
+      }
+      const key = r2KeyFor(req.user.username, id, kind, meta);
+      console.log(`proxy-upload start ${req.user.username} ${id}/${kind} size=${body.length} ct=${meta.contentType}`);
+      await s3.send(new PutObjectCommand({
+        Bucket:      R2_BUCKET,
+        Key:         key,
+        Body:        body,
+        ContentType: meta.contentType,
+      }));
+      const dt = Date.now() - started;
+      console.log(`proxy-upload ok    ${req.user.username} ${id}/${kind} size=${body.length} ${dt}ms`);
+      res.json({ ok: true, key });
+    } catch (e) {
+      const dt = Date.now() - started;
+      console.error(`proxy-upload fail  ${id}/${kind} ${dt}ms:`, e.message);
+      res.status(500).json({ error: 'upload_failed', message: e.message });
     }
-    const key = r2KeyFor(req.user.username, id, kind, meta);
-    await s3.send(new PutObjectCommand({
-      Bucket:        R2_BUCKET,
-      Key:           key,
-      Body:          req,
-      ContentType:   meta.contentType,
-      ContentLength: contentLength,
-    }));
-    res.json({ ok: true, key });
-  } catch (e) {
-    console.error('proxy-upload failed:', e);
-    res.status(500).json({ error: 'upload_failed', message: e.message });
   }
-});
+);
 
 // ============================================================
 //  POST /api/finalize-report
