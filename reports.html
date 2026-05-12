@@ -153,6 +153,33 @@
   }
   .file-link:hover { border-color: var(--yellow); }
   .file-link.pdf { background: var(--red); color: var(--white); border-color: var(--red); }
+  .video-block {
+    width: 100%;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .video-block video {
+    width: 100%;
+    max-height: 280px;
+    background: #000;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+  }
+  .video-block .video-caption {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .video-block .video-caption a {
+    color: var(--yellow);
+    text-decoration: none;
+  }
   .loading {
     text-align: center;
     color: var(--muted);
@@ -258,9 +285,23 @@ async function load() {
             </span></div>
           </div>
           <div class="files">
-            ${r.files.map(f => {
-              const isPdf = f.endsWith('.pdf');
-              return `<a class="file-link ${isPdf ? 'pdf' : ''}" href="/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}" target="_blank">${isPdf ? '📄 ' : '🎬 '}${escape(f.split('_').pop())}</a>`;
+            ${r.files.filter(f => f.endsWith('.pdf')).map(f =>
+              `<a class="file-link pdf" href="/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}" target="_blank">📄 ${escape(f)}</a>`
+            ).join('')}
+            ${r.files.filter(f => !f.endsWith('.pdf')).map(f => {
+              const src = `/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}`;
+              const type = f.endsWith('.mp4') ? 'video/mp4' : f.endsWith('.webm') ? 'video/webm' : '';
+              return `
+                <div class="video-block">
+                  <video controls playsinline preload="metadata">
+                    <source src="${src}" ${type ? `type="${type}"` : ''} />
+                    Your browser can't play this video.
+                  </video>
+                  <div class="video-caption">
+                    <span>🎬 ${escape(f)}</span>
+                    <a href="${src}" target="_blank" rel="noopener">open ↗</a>
+                  </div>
+                </div>`;
             }).join('')}
           </div>
         </div>`;
