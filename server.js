@@ -394,18 +394,51 @@ app.post('/api/presign-upload', requireAuth, async (req, res) => {
       const meta = resolveKindMeta(kind, mimes && mimes[kind]);
       if (!meta) continue;
       const key = r2KeyFor(req.user.username, id, kind, meta);
-      const cmd = new PutObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: key,
-        ContentType: meta.contentType,
-      });
-      const url = await getSignedUrl(s3, cmd, { expiresIn: 3600 });
-      uploads[kind] = { url, key, contentType: meta.contentType };
+      // Route the PUT through the server. Browsers never talk to R2
+      // directly, so the upload doesn't depend on the bucket's CORS
+      // policy lining up with whichever Railway domain is in use.
+      uploads[kind] = {
+        url:         `/api/proxy-upload/${encodeURIComponent(id)}/${encodeURIComponent(kind)}`,
+        key,
+        contentType: meta.contentType,
+      };
     }
     res.json({ reportId: id, uploads });
   } catch (e) {
     console.error('presign-upload failed:', e);
     res.status(500).json({ error: 'presign_failed', message: e.message });
+  }
+});
+
+// ============================================================
+//  PUT /api/proxy-upload/:reportId/:kind
+//  Streams the request body straight to R2 under the caller's user
+//  prefix. Same-origin, so no R2 CORS preflight is involved.
+// ============================================================
+app.put('/api/proxy-upload/:reportId/:kind', requireAuth, async (req, res) => {
+  if (!requireR2(res)) return;
+  try {
+    const id   = sanitize(req.params.reportId);
+    const kind = String(req.params.kind || '');
+    const mime = req.headers['content-type'];
+    const meta = resolveKindMeta(kind, mime);
+    if (!meta) return res.status(400).json({ error: 'bad_kind', message: `unknown kind: ${kind}` });
+    const contentLength = parseInt(req.headers['content-length'] || '0', 10);
+    if (!contentLength) {
+      return res.status(411).json({ error: 'length_required', message: 'Content-Length header required' });
+    }
+    const key = r2KeyFor(req.user.username, id, kind, meta);
+    await s3.send(new PutObjectCommand({
+      Bucket:        R2_BUCKET,
+      Key:           key,
+      Body:          req,
+      ContentType:   meta.contentType,
+      ContentLength: contentLength,
+    }));
+    res.json({ ok: true, key });
+  } catch (e) {
+    console.error('proxy-upload failed:', e);
+    res.status(500).json({ error: 'upload_failed', message: e.message });
   }
 });
 
