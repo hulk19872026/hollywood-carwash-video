@@ -38,6 +38,11 @@ const MAX_TOKENS      = parseInt(process.env.MAX_TOKENS || '1500', 10);
 const RETENTION_DAYS  = parseInt(process.env.RETENTION_DAYS || '30', 10);
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+// Legacy reports created before PR #21 live at reports/<id>/... (no username
+// segment). Surfacing them to the listing user named here lets pre-auth
+// inspections still be browsed without rewriting R2 objects.
+const LEGACY_REPORTS_OWNER = (process.env.LEGACY_REPORTS_OWNER || '').trim().toLowerCase();
+
 const SESSION_TTL_MS  = 30 * 24 * 60 * 60 * 1000;
 const COOKIE_NAME     = 'hcw_sess';
 const SESSION_SECRET  = process.env.SESSION_SECRET || (() => {
@@ -440,6 +445,40 @@ app.post('/api/finalize-report', requireAuth, async (req, res) => {
 // ============================================================
 //  GET /api/reports — list saved inspections from R2
 // ============================================================
+async function collectReportsForFolder(folder) {
+  let metadata = null;
+  let createdAt = null;
+  try {
+    const got = await s3.send(new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: `${folder}metadata.json`,
+    }));
+    const text = await got.Body.transformToString('utf8');
+    metadata = JSON.parse(text);
+    createdAt = metadata.timestamp || metadata.finalizedAt || null;
+  } catch {}
+
+  let files = [];
+  try {
+    const inner = await s3.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET,
+      Prefix: folder,
+    }));
+    files = (inner.Contents || [])
+      .map(c => c.Key.slice(folder.length))
+      .filter(f => f && f !== 'metadata.json');
+    if (!createdAt) {
+      const newest = (inner.Contents || [])
+        .map(c => c.LastModified)
+        .filter(Boolean)
+        .sort((a, b) => b - a)[0];
+      if (newest) createdAt = new Date(newest).toISOString();
+    }
+  } catch {}
+
+  return { metadata, createdAt, files };
+}
+
 app.get('/api/reports', requireAuth, async (req, res) => {
   if (!requireR2(res)) return;
   try {
@@ -456,42 +495,37 @@ app.get('/api/reports', requireAuth, async (req, res) => {
 
     const reports = [];
     for (const id of ids) {
-      const folder = `${userPrefix}${id}/`;
-      let metadata = null;
-      let createdAt = null;
-      try {
-        const got = await s3.send(new GetObjectCommand({
-          Bucket: R2_BUCKET,
-          Key: `${folder}metadata.json`,
-        }));
-        const text = await got.Body.transformToString('utf8');
-        metadata = JSON.parse(text);
-        createdAt = metadata.timestamp || metadata.finalizedAt || null;
-      } catch {}
+      const info = await collectReportsForFolder(`${userPrefix}${id}/`);
+      reports.push({ id, ...info });
+    }
 
-      let files = [];
-      try {
-        const inner = await s3.send(new ListObjectsV2Command({
-          Bucket: R2_BUCKET,
-          Prefix: folder,
-        }));
-        files = (inner.Contents || [])
-          .map(c => c.Key.slice(folder.length))
-          .filter(f => f && f !== 'metadata.json');
-        if (!createdAt) {
-          const newest = (inner.Contents || [])
-            .map(c => c.LastModified)
-            .filter(Boolean)
-            .sort((a, b) => b - a)[0];
-          if (newest) createdAt = new Date(newest).toISOString();
-        }
-      } catch {}
-
-      reports.push({ id, createdAt, files, metadata });
+    // Surface pre-auth reports (reports/<id>/...) to the designated owner.
+    // We distinguish legacy top-level folders from per-user folders by
+    // listing known usernames under users/.
+    let legacyCount = 0;
+    if (LEGACY_REPORTS_OWNER && req.user.username === LEGACY_REPORTS_OWNER) {
+      const [topReports, knownUsers] = await Promise.all([
+        s3.send(new ListObjectsV2Command({ Bucket: R2_BUCKET, Prefix: 'reports/', Delimiter: '/' })),
+        s3.send(new ListObjectsV2Command({ Bucket: R2_BUCKET, Prefix: 'users/' })),
+      ]);
+      const usernames = new Set(
+        (knownUsers.Contents || [])
+          .map(c => c.Key.match(/^users\/([^/]+)\.json$/)?.[1])
+          .filter(Boolean)
+      );
+      const legacyIds = (topReports.CommonPrefixes || [])
+        .map(p => p.Prefix.replace(/^reports\//, '').replace(/\/$/, ''))
+        .filter(id => id && !usernames.has(id));
+      for (const id of legacyIds) {
+        const info = await collectReportsForFolder(`reports/${id}/`);
+        if (!info.files.length && !info.metadata) continue;
+        reports.push({ id, legacy: true, ...info });
+        legacyCount++;
+      }
     }
 
     reports.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-    console.log(`  -> ${reports.length} reports for ${req.user.username}`);
+    console.log(`  -> ${reports.length} reports for ${req.user.username}${legacyCount ? ` (incl. ${legacyCount} legacy)` : ''}`);
     res.json({ reports, count: reports.length });
   } catch (e) {
     console.error('list reports failed:', e);
@@ -508,9 +542,24 @@ app.get('/api/reports/:id/:file', requireAuth, async (req, res) => {
   try {
     const id   = sanitize(req.params.id);
     const file = sanitize(req.params.file);
-    const url  = await getSignedUrl(s3, new GetObjectCommand({
+    let key = `${reportPrefix(req.user.username, id)}${file}`;
+    if (LEGACY_REPORTS_OWNER && req.user.username === LEGACY_REPORTS_OWNER) {
+      // Per-user key takes precedence; fall back to legacy un-namespaced
+      // path if no object exists at the new location.
+      try {
+        await s3.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+      } catch (e) {
+        const code = e.$metadata?.httpStatusCode;
+        if (e.name === 'NoSuchKey' || code === 404) {
+          key = `reports/${id}/${file}`;
+        } else {
+          throw e;
+        }
+      }
+    }
+    const url = await getSignedUrl(s3, new GetObjectCommand({
       Bucket: R2_BUCKET,
-      Key: `${reportPrefix(req.user.username, id)}${file}`,
+      Key: key,
     }), { expiresIn: 600 });
     res.redirect(302, url);
   } catch (e) {
