@@ -24,6 +24,7 @@ import {
   GetObjectCommand,
   ListObjectsV2Command,
   DeleteObjectsCommand,
+  CopyObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import 'dotenv/config';
@@ -37,6 +38,11 @@ const MODEL           = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514
 const MAX_TOKENS      = parseInt(process.env.MAX_TOKENS || '1500', 10);
 const RETENTION_DAYS  = parseInt(process.env.RETENTION_DAYS || '30', 10);
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// One-shot migration: pre-auth reports lived at reports/<id>/...; this moves
+// them under reports/<owner>/<id>/... at startup so they show up for that
+// user. Idempotent — runs every boot but only acts on un-migrated folders.
+const MIGRATE_LEGACY_REPORTS_TO = (process.env.MIGRATE_LEGACY_REPORTS_TO || '').trim().toLowerCase();
 
 const SESSION_TTL_MS  = 30 * 24 * 60 * 60 * 1000;
 const COOKIE_NAME     = 'hcw_sess';
@@ -388,13 +394,14 @@ app.post('/api/presign-upload', requireAuth, async (req, res) => {
       const meta = resolveKindMeta(kind, mimes && mimes[kind]);
       if (!meta) continue;
       const key = r2KeyFor(req.user.username, id, kind, meta);
-      const cmd = new PutObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: key,
-        ContentType: meta.contentType,
-      });
-      const url = await getSignedUrl(s3, cmd, { expiresIn: 3600 });
-      uploads[kind] = { url, key, contentType: meta.contentType };
+      // Route the PUT through the server. Browsers never talk to R2
+      // directly, so the upload doesn't depend on the bucket's CORS
+      // policy lining up with whichever Railway domain is in use.
+      uploads[kind] = {
+        url:         `/api/proxy-upload/${encodeURIComponent(id)}/${encodeURIComponent(kind)}`,
+        key,
+        contentType: meta.contentType,
+      };
     }
     res.json({ reportId: id, uploads });
   } catch (e) {
@@ -402,6 +409,54 @@ app.post('/api/presign-upload', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'presign_failed', message: e.message });
   }
 });
+
+// ============================================================
+//  PUT /api/proxy-upload/:reportId/:kind
+//  Buffers the request body in memory and PUTs it to R2 under the
+//  caller's user prefix. Same-origin so no R2 CORS preflight; buffering
+//  (vs streaming req directly into the SDK) sidesteps backpressure
+//  weirdness with http.IncomingMessage on some Node + SDK combos.
+// ============================================================
+app.put(
+  '/api/proxy-upload/:reportId/:kind',
+  requireAuth,
+  express.raw({ type: '*/*', limit: '200mb' }),
+  async (req, res) => {
+    if (!requireR2(res)) return;
+    const started = Date.now();
+    const id   = sanitize(req.params.reportId);
+    const kind = String(req.params.kind || '');
+    const mime = req.headers['content-type'] || '';
+    const ua   = (req.headers['user-agent'] || '').slice(0, 60);
+    try {
+      const meta = resolveKindMeta(kind, mime);
+      if (!meta) {
+        console.warn(`proxy-upload: bad kind=${kind} mime=${mime}`);
+        return res.status(400).json({ error: 'bad_kind', message: `unknown kind: ${kind}` });
+      }
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        console.warn(`proxy-upload: empty body for ${id}/${kind} (ua=${ua})`);
+        return res.status(400).json({ error: 'empty_body', message: 'request body was empty' });
+      }
+      const key = r2KeyFor(req.user.username, id, kind, meta);
+      console.log(`proxy-upload start ${req.user.username} ${id}/${kind} size=${body.length} ct=${meta.contentType}`);
+      await s3.send(new PutObjectCommand({
+        Bucket:      R2_BUCKET,
+        Key:         key,
+        Body:        body,
+        ContentType: meta.contentType,
+      }));
+      const dt = Date.now() - started;
+      console.log(`proxy-upload ok    ${req.user.username} ${id}/${kind} size=${body.length} ${dt}ms`);
+      res.json({ ok: true, key });
+    } catch (e) {
+      const dt = Date.now() - started;
+      console.error(`proxy-upload fail  ${id}/${kind} ${dt}ms:`, e.message);
+      res.status(500).json({ error: 'upload_failed', message: e.message });
+    }
+  }
+);
 
 // ============================================================
 //  POST /api/finalize-report
@@ -604,6 +659,72 @@ async function pruneOldReports() {
 }
 
 // ============================================================
+//  One-shot migration: move legacy reports/<id>/* under reports/<owner>/<id>/*
+// ============================================================
+async function migrateLegacyReports(owner) {
+  if (!R2_READY) return;
+  if (!USERNAME_RE.test(owner)) {
+    console.warn(`migrate-legacy: invalid owner "${owner}", skipping`);
+    return;
+  }
+  let migrated = 0;
+  let skipped  = 0;
+  try {
+    const [topReports, knownUsers] = await Promise.all([
+      s3.send(new ListObjectsV2Command({ Bucket: R2_BUCKET, Prefix: 'reports/', Delimiter: '/' })),
+      s3.send(new ListObjectsV2Command({ Bucket: R2_BUCKET, Prefix: 'users/' })),
+    ]);
+    const usernames = new Set(
+      (knownUsers.Contents || [])
+        .map(c => c.Key.match(/^users\/([^/]+)\.json$/)?.[1])
+        .filter(Boolean)
+    );
+    const legacyFolders = (topReports.CommonPrefixes || [])
+      .map(p => p.Prefix)
+      .filter(prefix => {
+        const id = prefix.replace(/^reports\//, '').replace(/\/$/, '');
+        return id && !usernames.has(id);
+      });
+
+    if (!legacyFolders.length) {
+      console.log(`migrate-legacy: nothing to do for owner=${owner}`);
+      return;
+    }
+
+    for (const folder of legacyFolders) {
+      const id = folder.replace(/^reports\//, '').replace(/\/$/, '');
+      const destPrefix = `reports/${owner}/${id}/`;
+      try {
+        const inner = await s3.send(new ListObjectsV2Command({ Bucket: R2_BUCKET, Prefix: folder }));
+        const objects = inner.Contents || [];
+        if (!objects.length) { skipped++; continue; }
+
+        for (const obj of objects) {
+          const rel  = obj.Key.slice(folder.length);
+          const dest = `${destPrefix}${rel}`;
+          await s3.send(new CopyObjectCommand({
+            Bucket:     R2_BUCKET,
+            Key:        dest,
+            CopySource: `/${R2_BUCKET}/${encodeURIComponent(obj.Key).replace(/%2F/g, '/')}`,
+          }));
+        }
+        await s3.send(new DeleteObjectsCommand({
+          Bucket: R2_BUCKET,
+          Delete: { Objects: objects.map(o => ({ Key: o.Key })), Quiet: true },
+        }));
+        console.log(`✓ migrated ${folder} -> ${destPrefix} (${objects.length} objects)`);
+        migrated++;
+      } catch (e) {
+        console.error(`migrate-legacy ${folder} failed:`, e.message);
+      }
+    }
+    console.log(`★ migrate-legacy: ${migrated} folder(s) moved to reports/${owner}/, ${skipped} skipped`);
+  } catch (e) {
+    console.error('migrateLegacyReports failed:', e);
+  }
+}
+
+// ============================================================
 //  Health check
 // ============================================================
 app.get('/health', (_req, res) => {
@@ -649,6 +770,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`★ Retention: ${RETENTION_DAYS} days\n`);
 
   if (R2_READY) {
+    if (MIGRATE_LEGACY_REPORTS_TO) migrateLegacyReports(MIGRATE_LEGACY_REPORTS_TO);
     pruneOldReports();
     setInterval(pruneOldReports, PRUNE_INTERVAL_MS);
   }

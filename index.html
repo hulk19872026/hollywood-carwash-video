@@ -1812,12 +1812,25 @@ const API_TIMEOUT_MS = 30 * 1000;
 function xhrPut(url, body, contentType, timeoutMs) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    const started = Date.now();
+    let sent = 0;
     xhr.open('PUT', url, true);
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader('Content-Type', contentType);
+    if (xhr.upload) xhr.upload.onprogress = (e) => { if (e.loaded) sent = e.loaded; };
     xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText || '' });
-    xhr.onerror = () => reject(new Error('network error'));
-    xhr.ontimeout = () => { const e = new Error('timed out'); e.name = 'TimeoutError'; reject(e); };
+    xhr.onerror = () => {
+      const dt = ((Date.now() - started) / 1000).toFixed(1);
+      const total = body && body.size != null ? body.size : null;
+      const sentLabel = total ? `${formatBytes(sent)}/${formatBytes(total)}` : formatBytes(sent);
+      reject(new Error(`network error (status=${xhr.status} readyState=${xhr.readyState} ${dt}s sent=${sentLabel})`));
+    };
+    xhr.ontimeout = () => {
+      const dt = ((Date.now() - started) / 1000).toFixed(1);
+      const e = new Error(`timed out after ${dt}s (sent=${formatBytes(sent)})`);
+      e.name = 'TimeoutError';
+      reject(e);
+    };
     xhr.onabort = () => reject(new Error('aborted'));
     xhr.send(body);
   });
