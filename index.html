@@ -662,6 +662,7 @@
         Signed in as <span id="auth-username-chip" style="color:var(--yellow);font-weight:700;"></span>
         · <a href="#" onclick="authLogout();return false;" style="color:var(--yellow);text-decoration:underline;">Sign out</a>
       </div>
+      <div id="build-chip" style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#555;">build —</div>
     </div>
     <div class="home-actions">
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
@@ -758,6 +759,13 @@
       </div>
       <div style="margin-top:12px;text-align:right;">
         <a href="#" onclick="if(confirm('Delete every queued job? This will discard the PDFs/videos that have not uploaded yet.')){clearAllQueue();}return false;" style="color:#ff9a9a;font-family:'JetBrains Mono',monospace;font-size:11px;text-decoration:underline;">🗑 delete all queued</a>
+      </div>
+
+      <div style="margin-top:22px;padding-top:18px;border-top:1px dashed var(--line);">
+        <div style="font-family:'Bungee',cursive;color:var(--yellow);font-size:13px;letter-spacing:0.05em;margin-bottom:10px;">★ DIAGNOSTICS</div>
+        <div id="diag-info" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#bbb;line-height:1.7;margin-bottom:10px;"></div>
+        <button class="btn btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="runUploadCheck()">🧪 RUN UPLOAD TEST</button>
+        <div id="diag-output" style="margin-top:10px;font-family:'JetBrains Mono',monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;background:#0e0e0e;border:1px solid var(--line);padding:10px 12px;border-radius:4px;color:#9fe0a8;display:none;"></div>
       </div>
     </div>
   </div>
@@ -2044,6 +2052,7 @@ async function updateQueueBadge() {
 function showQueue() {
   show('queue');
   renderQueueScreen();
+  renderDiagInfo();
 }
 
 async function renderQueueScreen() {
@@ -2132,7 +2141,66 @@ async function clearAllQueue() {
 
 window.addEventListener('online', processQueue);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) processQueue(); });
-window.addEventListener('load', () => { processQueue(); setInterval(processQueue, 30000); });
+window.addEventListener('load', () => { processQueue(); setInterval(processQueue, 30000); fetchBuildTag(); });
+
+let _buildTag = '—';
+async function fetchBuildTag() {
+  try {
+    const r = await fetch('/api/version', { credentials: 'same-origin', cache: 'no-store' });
+    if (!r.ok) return;
+    const j = await r.json();
+    _buildTag = j.build || '—';
+    const el = document.getElementById('build-chip');
+    if (el) el.textContent = 'build ' + _buildTag;
+  } catch {}
+}
+
+function renderDiagInfo() {
+  const el = document.getElementById('diag-info');
+  if (!el) return;
+  const lines = [
+    `build:     ${_buildTag}`,
+    `online:    ${navigator.onLine ? 'yes' : 'NO'}`,
+    `user:      ${(document.getElementById('auth-username-chip')?.textContent) || '(not signed in)'}`,
+    `origin:    ${location.origin}`,
+  ];
+  el.textContent = lines.join('\n');
+}
+
+async function runUploadCheck() {
+  const out = document.getElementById('diag-output');
+  if (!out) return;
+  out.style.display = '';
+  out.style.color = '#cccccc';
+  out.textContent = 'Running…';
+  const startedAt = Date.now();
+  const payload = new Blob([crypto.getRandomValues(new Uint8Array(1024))], { type: 'application/octet-stream' });
+  try {
+    const r = await fetch('/api/diagnostics/upload-check', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: payload,
+    });
+    const text = await r.text();
+    let j = null; try { j = JSON.parse(text); } catch {}
+    const totalMs = Date.now() - startedAt;
+    if (r.ok && j && j.ok) {
+      out.style.color = '#9fe0a8';
+      out.textContent =
+        `✓ OK — round trip ${totalMs}ms (${j.bytes} bytes)\n` +
+        j.steps.map(s => `  ${s.step.padEnd(8)} ${s.ok ? 'ok' : 'FAIL'}  ${s.ms != null ? s.ms + 'ms' : ''}${s.error ? '  ' + s.error : ''}`).join('\n');
+    } else {
+      out.style.color = '#ff9a9a';
+      out.textContent =
+        `✗ FAILED — http ${r.status} after ${totalMs}ms\n` +
+        (j ? (j.steps || []).map(s => `  ${s.step.padEnd(8)} ${s.ok ? 'ok' : 'FAIL'}  ${s.ms != null ? s.ms + 'ms' : ''}${s.error ? '  ' + s.error : ''}`).join('\n') + (j.error ? '\n  error: ' + j.error : '') : text.slice(0, 400));
+    }
+  } catch (e) {
+    out.style.color = '#ff9a9a';
+    out.textContent = `✗ NETWORK ERROR — ${e.message || e}`;
+  }
+}
 
 async function saveToServer() {
   // Legacy shim — uploads now happen via the background queue.

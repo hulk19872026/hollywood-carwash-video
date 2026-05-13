@@ -748,6 +748,48 @@ app.get('/api/version', (_req, res) => {
 });
 
 // ============================================================
+//  POST /api/diagnostics/upload-check
+//  End-to-end R2 upload health check: PUT a small body, GET it back
+//  to verify it landed intact, then DELETE. Returns per-step timings
+//  so a stuck upload can be triaged without recording an inspection.
+// ============================================================
+app.post(
+  '/api/diagnostics/upload-check',
+  requireAuth,
+  express.raw({ type: '*/*', limit: '5mb' }),
+  async (req, res) => {
+    if (!requireR2(res)) return;
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const key  = `diagnostics/${req.user.username}/upload-test-${Date.now()}.bin`;
+    const steps = [];
+    const tick = (label, fn) => {
+      const start = Date.now();
+      return fn().then(
+        (v) => { steps.push({ step: label, ok: true,  ms: Date.now() - start }); return v; },
+        (e) => { steps.push({ step: label, ok: false, ms: Date.now() - start, error: e.message }); throw e; },
+      );
+    };
+    try {
+      await tick('put', () => s3.send(new PutObjectCommand({
+        Bucket: R2_BUCKET, Key: key, Body: body, ContentType: 'application/octet-stream',
+      })));
+      const got = await tick('get', () => s3.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key })));
+      const verified = await got.Body.transformToString('base64');
+      const expected = body.toString('base64');
+      const match = verified === expected;
+      steps.push({ step: 'verify', ok: match, bytes: body.length });
+      await tick('delete', () => s3.send(new DeleteObjectsCommand({
+        Bucket: R2_BUCKET, Delete: { Objects: [{ Key: key }], Quiet: true },
+      })));
+      res.json({ ok: match, bytes: body.length, key, steps });
+    } catch (e) {
+      console.error('upload-check failed:', e.message);
+      res.status(500).json({ ok: false, error: e.message, key, steps });
+    }
+  }
+);
+
+// ============================================================
 //  404 + error handlers (must be registered last so real routes win)
 // ============================================================
 app.use((req, res) => {
