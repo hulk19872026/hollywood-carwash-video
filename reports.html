@@ -53,6 +53,43 @@
     display: flex; justify-content: space-between; align-items: center;
     margin-bottom: 20px; gap: 12px; flex-wrap: wrap;
   }
+  .search-wrap {
+    position: relative;
+    flex: 1 1 240px;
+    max-width: 360px;
+  }
+  .search-wrap input {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    padding: 9px 36px 9px 34px;
+    outline: none;
+  }
+  .search-wrap input:focus { border-color: var(--yellow); }
+  .search-wrap .icon {
+    position: absolute; left: 10px; top: 50%;
+    transform: translateY(-50%);
+    color: var(--muted);
+    font-size: 14px;
+    pointer-events: none;
+  }
+  .search-wrap .clear {
+    position: absolute; right: 8px; top: 50%;
+    transform: translateY(-50%);
+    color: var(--muted);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 6px;
+    display: none;
+  }
+  .search-wrap .clear:hover { color: var(--yellow); }
   .count {
     font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
@@ -208,6 +245,11 @@
 
   <div class="toolbar">
     <div class="count" id="count">Loading...</div>
+    <div class="search-wrap">
+      <span class="icon">🔍</span>
+      <input id="search" type="search" inputmode="search" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" placeholder="Search plate, VIN, make/model…" />
+      <button class="clear" id="search-clear" type="button" aria-label="Clear search">×</button>
+    </div>
     <div style="display:flex;gap:10px;align-items:center;">
       <span id="user-chip" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);"></span>
       <button class="btn" id="refresh-btn" onclick="load()">↻ Refresh</button>
@@ -221,6 +263,143 @@
 </div>
 
 <script>
+let _allReports = [];
+
+function searchableTokens(r) {
+  const meta = r.metadata || {};
+  const ext = (meta.analysis && meta.analysis.exterior) || {};
+  const plate = ext.license_plate || {};
+  const v = ext.vehicle || {};
+  return [
+    r.id,
+    plate.number, plate.state,
+    v.vin, v.make, v.model, v.make_model, v.year, v.color, v.body_style,
+  ].filter(Boolean).map(s => String(s).toLowerCase()).join(' ');
+}
+
+function matchesQuery(r, q) {
+  if (!q) return true;
+  const needles = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const hay = searchableTokens(r);
+  return needles.every(n => hay.includes(n));
+}
+
+function cardHtml(r) {
+  const meta = r.metadata || {};
+  const ext = (meta.analysis && meta.analysis.exterior) || {};
+  const intA = (meta.analysis && meta.analysis.interior) || {};
+  const plate = ext.license_plate || {};
+  const vehicle = ext.vehicle || {};
+  const modelLine = [vehicle.year, vehicle.model || vehicle.make_model].filter(Boolean).join(' ');
+  const damage = (ext.damage || []).length;
+  const issues = (intA.issues || []).length;
+  const totalFlags = damage + issues;
+  const date = new Date(r.createdAt);
+
+  return `
+    <div class="report-card">
+      <div class="report-id">${escape(r.id)}</div>
+      <div class="report-when">${date.toLocaleString()}</div>
+      <div class="report-meta">
+        <div class="row"><span class="label">VIN</span><span class="val">${escape(vehicle.vin || 'NOT READ')}</span></div>
+        <div class="row"><span class="label">Make</span><span class="val">${escape(vehicle.make || '—')}</span></div>
+        <div class="row"><span class="label">Model</span><span class="val">${escape(modelLine || '—')}</span></div>
+        <div class="row"><span class="label">Color</span><span class="val">${escape(vehicle.color || '—')}</span></div>
+        <div class="row"><span class="label">Plate</span><span class="val">${escape(plate.number || 'NOT READ')}${plate.state ? ' / ' + escape(plate.state) : ''}</span></div>
+        <div class="row"><span class="label">Findings</span><span class="val">
+          ${totalFlags === 0
+            ? '<span class="badge ok">CLEAR</span>'
+            : '<span class="badge">' + totalFlags + ' flagged</span>'}
+        </span></div>
+      </div>
+      <div class="files">
+        ${r.files.filter(f => f.endsWith('.pdf')).map(f =>
+          `<a class="file-link pdf" href="/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}" target="_blank">📄 ${escape(f)}</a>`
+        ).join('')}
+        ${r.files.filter(f => !f.endsWith('.pdf')).map(f => {
+          const src = `/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}`;
+          const type = f.endsWith('.mp4') ? 'video/mp4' : f.endsWith('.webm') ? 'video/webm' : '';
+          return `
+            <div class="video-block">
+              <video controls playsinline preload="metadata">
+                <source src="${src}" ${type ? `type="${type}"` : ''} />
+                Your browser can't play this video.
+              </video>
+              <div class="video-caption">
+                <span>🎬 ${escape(f)}</span>
+                <a href="${src}" target="_blank" rel="noopener">open ↗</a>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function renderReports(query) {
+  const container = document.getElementById('container');
+  const countEl   = document.getElementById('count');
+  const q = (query || '').trim();
+  const total = _allReports.length;
+
+  if (!total) {
+    countEl.innerHTML = '';
+    container.innerHTML = `
+      <div class="empty">
+        <h3>NO REPORTS YET</h3>
+        <p>Reports saved from the inspection app will show up here.</p>
+      </div>`;
+    return;
+  }
+
+  const filtered = q ? _allReports.filter(r => matchesQuery(r, q)) : _allReports;
+  countEl.innerHTML = q
+    ? `<strong>${filtered.length}</strong> of ${total} match "${escape(q)}"`
+    : `<strong>${total}</strong> reports on file`;
+
+  if (!filtered.length) {
+    container.innerHTML = `
+      <div class="empty">
+        <h3>NO MATCHES</h3>
+        <p>No reports match <strong>${escape(q)}</strong>. Try a partial plate, VIN, or make.</p>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = '<div class="reports">' + filtered.map(cardHtml).join('') + '</div>';
+}
+
+function readQueryFromUrl() {
+  try {
+    const p = new URLSearchParams(location.search);
+    return p.get('q') || '';
+  } catch { return ''; }
+}
+
+function writeQueryToUrl(q) {
+  try {
+    const url = new URL(location.href);
+    if (q) url.searchParams.set('q', q);
+    else url.searchParams.delete('q');
+    history.replaceState(null, '', url);
+  } catch {}
+}
+
+function wireSearch() {
+  const input = document.getElementById('search');
+  const clear = document.getElementById('search-clear');
+  if (!input) return;
+  const apply = () => {
+    const q = input.value;
+    clear.style.display = q ? 'block' : 'none';
+    renderReports(q);
+    writeQueryToUrl(q);
+  };
+  input.addEventListener('input', apply);
+  clear.addEventListener('click', () => { input.value = ''; apply(); input.focus(); });
+  const initial = readQueryFromUrl();
+  if (initial) { input.value = initial; clear.style.display = 'block'; }
+}
+
 async function load() {
   const container = document.getElementById('container');
   const countEl = document.getElementById('count');
@@ -245,67 +424,8 @@ async function load() {
       return;
     }
     const data = await r.json();
-    countEl.innerHTML = '<strong>' + data.count + '</strong> reports on file';
-
-    if (!data.reports || data.reports.length === 0) {
-      container.innerHTML = `
-        <div class="empty">
-          <h3>NO REPORTS YET</h3>
-          <p>Reports saved from the inspection app will show up here.</p>
-        </div>`;
-      return;
-    }
-
-    container.innerHTML = '<div class="reports">' + data.reports.map(r => {
-      const meta = r.metadata || {};
-      const ext = (meta.analysis && meta.analysis.exterior) || {};
-      const intA = (meta.analysis && meta.analysis.interior) || {};
-      const plate = ext.license_plate || {};
-      const vehicle = ext.vehicle || {};
-      const modelLine = [vehicle.year, vehicle.model || vehicle.make_model].filter(Boolean).join(' ');
-      const damage = (ext.damage || []).length;
-      const issues = (intA.issues || []).length;
-      const totalFlags = damage + issues;
-      const date = new Date(r.createdAt);
-
-      return `
-        <div class="report-card">
-          <div class="report-id">${escape(r.id)}</div>
-          <div class="report-when">${date.toLocaleString()}</div>
-          <div class="report-meta">
-            <div class="row"><span class="label">VIN</span><span class="val">${escape(vehicle.vin || 'NOT READ')}</span></div>
-            <div class="row"><span class="label">Make</span><span class="val">${escape(vehicle.make || '—')}</span></div>
-            <div class="row"><span class="label">Model</span><span class="val">${escape(modelLine || '—')}</span></div>
-            <div class="row"><span class="label">Color</span><span class="val">${escape(vehicle.color || '—')}</span></div>
-            <div class="row"><span class="label">Plate</span><span class="val">${escape(plate.number || 'NOT READ')}${plate.state ? ' / ' + escape(plate.state) : ''}</span></div>
-            <div class="row"><span class="label">Findings</span><span class="val">
-              ${totalFlags === 0
-                ? '<span class="badge ok">CLEAR</span>'
-                : '<span class="badge">' + totalFlags + ' flagged</span>'}
-            </span></div>
-          </div>
-          <div class="files">
-            ${r.files.filter(f => f.endsWith('.pdf')).map(f =>
-              `<a class="file-link pdf" href="/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}" target="_blank">📄 ${escape(f)}</a>`
-            ).join('')}
-            ${r.files.filter(f => !f.endsWith('.pdf')).map(f => {
-              const src = `/api/reports/${encodeURIComponent(r.id)}/${encodeURIComponent(f)}`;
-              const type = f.endsWith('.mp4') ? 'video/mp4' : f.endsWith('.webm') ? 'video/webm' : '';
-              return `
-                <div class="video-block">
-                  <video controls playsinline preload="metadata">
-                    <source src="${src}" ${type ? `type="${type}"` : ''} />
-                    Your browser can't play this video.
-                  </video>
-                  <div class="video-caption">
-                    <span>🎬 ${escape(f)}</span>
-                    <a href="${src}" target="_blank" rel="noopener">open ↗</a>
-                  </div>
-                </div>`;
-            }).join('')}
-          </div>
-        </div>`;
-    }).join('') + '</div>';
+    _allReports = data.reports || [];
+    renderReports(document.getElementById('search')?.value || '');
   } catch (e) {
     container.innerHTML = `<div class="empty"><h3>ERROR</h3><p>${escape(e.message)}</p></div>`;
   }
@@ -317,6 +437,7 @@ function escape(s) {
   }[c]));
 }
 
+wireSearch();
 load();
 </script>
 </body>
