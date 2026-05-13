@@ -623,7 +623,7 @@
 </style>
 </head>
 <body>
-<div id="q-badge" onclick="showQueueDetails()" style="display:none;position:fixed;top:12px;right:12px;z-index:9999;padding:8px 14px;border-radius:8px;background:#102a3a;color:#fff;font:600 13px/1.2 Manrope,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);align-items:center;gap:8px;cursor:pointer;"></div>
+<div id="q-badge" onclick="showQueue()" style="display:none;position:fixed;top:12px;right:12px;z-index:9999;padding:8px 14px;border-radius:8px;background:#102a3a;color:#fff;font:600 13px/1.2 Manrope,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);align-items:center;gap:8px;cursor:pointer;"></div>
 <div class="app">
 
   <!-- HEADER -->
@@ -666,8 +666,9 @@
     <div class="home-actions">
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
       <a class="btn btn-ghost" href="/reports" target="_blank" style="text-decoration:none;">📋 VIEW REPORTS</a>
+      <button class="btn btn-ghost" id="home-queue-btn" style="display:none;" onclick="showQueue()">📤 UPLOAD QUEUE</button>
     </div>
-    <div id="upload-status" style="display:none;margin-top:18px;padding:14px 16px;border-radius:6px;background:#102a3a;border:1px solid #1f4a66;font-size:13px;font-family:'JetBrains Mono',monospace;color:#fff;"></div>
+    <div id="upload-status" onclick="showQueue()" style="display:none;cursor:pointer;margin-top:18px;padding:14px 16px;border-radius:6px;background:#102a3a;border:1px solid #1f4a66;font-size:13px;font-family:'JetBrains Mono',monospace;color:#fff;"></div>
   </div>
 
   <!-- ============ SCREEN: RECORDING ============ -->
@@ -741,6 +742,22 @@
       <div class="btn-row">
         <button class="btn btn-primary" onclick="downloadReport()">📥 DOWNLOAD PDF AGAIN</button>
         <button class="btn btn-ghost" onclick="resetApp()">+ NEW INSPECTION</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN: UPLOAD QUEUE ============ -->
+  <div class="screen" id="screen-queue">
+    <div class="panel">
+      <div class="panel-title"><span class="num">★</span> Upload Queue</div>
+      <div id="queue-summary" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);margin-bottom:14px;"></div>
+      <div id="queue-list"></div>
+      <div class="btn-row" style="margin-top:18px;">
+        <button class="btn btn-primary" onclick="retryAllQueue()">↻ RETRY ALL</button>
+        <button class="btn btn-ghost" onclick="show('home');updateQueueBadge();">← BACK</button>
+      </div>
+      <div style="margin-top:12px;text-align:right;">
+        <a href="#" onclick="if(confirm('Delete every queued job? This will discard the PDFs/videos that have not uploaded yet.')){clearAllQueue();}return false;" style="color:#ff9a9a;font-family:'JetBrains Mono',monospace;font-size:11px;text-decoration:underline;">🗑 delete all queued</a>
       </div>
     </div>
   </div>
@@ -1974,76 +1991,141 @@ function handleAuthExpired() {
 }
 
 async function updateQueueBadge() {
-  const el = document.getElementById('q-badge');
-  const panel = document.getElementById('upload-status');
+  const badge   = document.getElementById('q-badge');
+  const panel   = document.getElementById('upload-status');
+  const homeBtn = document.getElementById('home-queue-btn');
   const jobs = await qAll().catch(() => []);
   if (!jobs.length) {
-    if (el)    el.style.display = 'none';
-    if (panel) panel.style.display = 'none';
+    if (badge)   badge.style.display = 'none';
+    if (panel)   panel.style.display = 'none';
+    if (homeBtn) homeBtn.style.display = 'none';
+    if (document.getElementById('screen-queue')?.classList.contains('active')) renderQueueScreen();
     return;
   }
   const failed    = jobs.filter(j => j.status === 'failed').length;
   const uploading = jobs.filter(j => j.status === 'uploading').length;
-  const pending   = jobs.length - uploading - failed;
 
-  if (el) {
-    el.style.display = 'flex';
+  if (badge) {
+    badge.style.display = 'flex';
     let label = `📤 ${jobs.length} upload${jobs.length === 1 ? '' : 's'}`;
     if (uploading) label += ` · ${uploading} sending`;
     if (failed)    label += ` · ${failed} failed`;
-    el.textContent = label;
-    el.style.background = failed ? '#5a1010' : (uploading ? '#3a3a10' : '#102a3a');
+    badge.textContent = label;
+    badge.style.background = failed ? '#5a1010' : (uploading ? '#3a3a10' : '#102a3a');
+  }
+
+  if (homeBtn) {
+    homeBtn.style.display = '';
+    const total = jobs.length;
+    let label = `📤 UPLOAD QUEUE (${total}`;
+    if (failed)    label += `, ${failed} failed`;
+    if (uploading) label += `, ${uploading} sending`;
+    label += ')';
+    homeBtn.textContent = label;
   }
 
   if (panel) {
     const totalBytes = jobs.reduce((sum, j) => sum + Object.values(j.files || {}).reduce((s, b) => s + (b?.size || 0), 0), 0);
-    const items = jobs.map(j => {
-      const sizes = Object.entries(j.files || {})
-        .map(([k, b]) => `${k} ${formatBytes(b?.size || 0)}`).join(' + ');
-      const statusLabel = j.status === 'uploading' ? '⏳ sending'
-                        : j.status === 'failed'    ? '⚠ failed'
-                        : '… queued';
-      const err = j.lastError ? `<div style="color:#ff9a9a;margin-top:4px;font-size:11px;word-break:break-word;">${escapeHtml(j.lastError)}</div>` : '';
-      return `<div style="border-top:1px solid #1f4a66;padding:8px 0;">
-        <div><strong>${escapeHtml(j.reportId)}</strong> · ${statusLabel} · ${escapeHtml(sizes)} · attempts: ${j.attempts || 0}</div>
-        ${err}
-      </div>`;
-    }).join('');
     panel.style.display = '';
     panel.style.background = failed ? '#3a1414' : (uploading ? '#3a3a10' : '#102a3a');
     panel.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <span><strong>Pending uploads:</strong> ${jobs.length} · ${formatBytes(totalBytes)}</span>
-        <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="processQueue().catch(()=>{});updateQueueBadge();">↻ Retry</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <span><strong>${jobs.length}</strong> queued · ${formatBytes(totalBytes)}${failed ? ` · <span style="color:#ff9a9a;">${failed} failed</span>` : ''}</span>
+        <span style="color:var(--yellow);text-decoration:underline;">open queue ↗</span>
       </div>
-      ${items}
     `;
   }
+
+  if (document.getElementById('screen-queue')?.classList.contains('active')) renderQueueScreen();
 }
 
-async function showQueueDetails() {
+function showQueue() {
+  show('queue');
+  renderQueueScreen();
+}
+
+async function renderQueueScreen() {
+  const summaryEl = document.getElementById('queue-summary');
+  const listEl    = document.getElementById('queue-list');
+  if (!summaryEl || !listEl) return;
   const jobs = await qAll().catch(() => []);
-  if (!jobs.length) return;
-  const totalBytes = jobs.reduce((sum, j) => sum + Object.values(j.files || {}).reduce((s, b) => s + (b?.size || 0), 0), 0);
-  const lines = jobs.map(j => {
-    const kinds = Object.keys(j.files || {}).join(',');
-    const mimes = j.mimes ? Object.entries(j.mimes).map(([k,v]) => `${k}=${v}`).join(' ') : '';
-    const sizes = Object.entries(j.files || {}).map(([k,b]) => `${k}=${formatBytes(b?.size || 0)}`).join(' ');
-    return `• ${j.reportId}\n  status: ${j.status}\n  files: ${kinds}\n  sizes: ${sizes}\n  mimes: ${mimes}\n  attempts: ${j.attempts || 0}\n  error: ${j.lastError || '(none)'}`;
-  }).join('\n\n');
-  const failedCount = jobs.filter(j => j.status === 'failed').length;
-  const action = '\n\nTap OK to retry pending/failed jobs now.\nTap Cancel to DELETE all queued jobs.';
-  if (confirm(`Upload queue (${jobs.length}, ${formatBytes(totalBytes)}):\n\n${lines}${action}`)) {
-    // Reset attempts so the cap doesn't immediately reject, but KEEP
-    // lastError so we don't lose diagnostic info on the retry round.
-    for (const j of jobs) {
-      await qPut({ ...j, status: 'pending', attempts: 0 });
-    }
-    processQueue();
-  } else {
-    for (const j of jobs) await qDel(j.reportId);
-    updateQueueBadge();
+  if (!jobs.length) {
+    summaryEl.textContent = '';
+    listEl.innerHTML = `<div style="padding:24px 14px;text-align:center;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:12px;">Queue is empty. New inspections will appear here while they upload.</div>`;
+    return;
   }
+  const totalBytes = jobs.reduce((sum, j) => sum + Object.values(j.files || {}).reduce((s, b) => s + (b?.size || 0), 0), 0);
+  const failed    = jobs.filter(j => j.status === 'failed').length;
+  const uploading = jobs.filter(j => j.status === 'uploading').length;
+  summaryEl.innerHTML =
+    `${jobs.length} job${jobs.length === 1 ? '' : 's'} · ${formatBytes(totalBytes)}` +
+    (uploading ? ` · <span style="color:var(--yellow);">${uploading} sending</span>` : '') +
+    (failed    ? ` · <span style="color:#ff9a9a;">${failed} failed</span>` : '');
+
+  listEl.innerHTML = jobs.map(j => {
+    const statusBadge =
+      j.status === 'uploading' ? '<span style="color:#ffd400;">⏳ SENDING</span>'
+      : j.status === 'failed'  ? '<span style="color:#ff9a9a;">⚠ FAILED</span>'
+      : '<span style="color:#88c5ff;">… QUEUED</span>';
+    const filesInfo = Object.entries(j.files || {})
+      .map(([k, b]) => `${k} ${formatBytes(b?.size || 0)}`).join(' + ') || '—';
+    const mimes = j.mimes ? Object.entries(j.mimes).map(([k,v]) => `${k}=${v}`).join('  ') : '';
+    const when = j.queuedAt ? new Date(j.queuedAt).toLocaleString() : '';
+    const err  = j.lastError
+      ? `<div style="margin-top:8px;padding:8px 10px;background:#2a0e0e;border-left:3px solid #ff5050;border-radius:3px;font-size:11px;color:#ffb0b0;word-break:break-word;white-space:pre-wrap;">${escapeHtml(j.lastError)}</div>`
+      : '';
+    return `
+      <div style="border:1px solid var(--line);border-radius:5px;padding:12px 14px;margin-bottom:10px;background:#0e0e0e;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--yellow);">${escapeHtml(j.reportId)}</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-top:2px;">${escapeHtml(when)}</div>
+          </div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;">${statusBadge}</div>
+        </div>
+        <div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#ccc;">
+          files: ${escapeHtml(filesInfo)}<br/>
+          ${mimes ? 'mimes: ' + escapeHtml(mimes) + '<br/>' : ''}
+          attempts: ${j.attempts || 0}
+        </div>
+        ${err}
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-ghost" style="padding:6px 12px;font-size:11px;" onclick="retryQueueJob('${encodeURIComponent(j.reportId).replace(/'/g, "%27")}')">↻ Retry</button>
+          <button class="btn btn-ghost" style="padding:6px 12px;font-size:11px;color:#ff9a9a;border-color:#ff9a9a;" onclick="deleteQueueJob('${encodeURIComponent(j.reportId).replace(/'/g, "%27")}')">🗑 Delete</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function retryQueueJob(encId) {
+  const id = decodeURIComponent(encId);
+  const j = await qGet(id);
+  if (!j) { renderQueueScreen(); return; }
+  await qPut({ ...j, status: 'pending', attempts: 0 });
+  renderQueueScreen();
+  processQueue().catch(() => {});
+}
+
+async function deleteQueueJob(encId) {
+  const id = decodeURIComponent(encId);
+  if (!confirm(`Delete ${id}? This discards the PDF and video for this inspection.`)) return;
+  await qDel(id);
+  renderQueueScreen();
+  updateQueueBadge();
+}
+
+async function retryAllQueue() {
+  const jobs = await qAll().catch(() => []);
+  for (const j of jobs) await qPut({ ...j, status: 'pending', attempts: 0 });
+  renderQueueScreen();
+  processQueue().catch(() => {});
+}
+
+async function clearAllQueue() {
+  const jobs = await qAll().catch(() => []);
+  for (const j of jobs) await qDel(j.reportId);
+  renderQueueScreen();
+  updateQueueBadge();
 }
 
 window.addEventListener('online', processQueue);
