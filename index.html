@@ -767,6 +767,14 @@
         <button class="btn btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="runUploadCheck()">🧪 RUN UPLOAD TEST</button>
         <div id="diag-output" style="margin-top:10px;font-family:'JetBrains Mono',monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;background:#0e0e0e;border:1px solid var(--line);padding:10px 12px;border-radius:4px;color:#9fe0a8;display:none;"></div>
       </div>
+
+      <div style="margin-top:22px;padding-top:18px;border-top:1px dashed var(--line);">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px;">
+          <div style="font-family:'Bungee',cursive;color:var(--yellow);font-size:13px;letter-spacing:0.05em;">★ ACTIVITY LOG</div>
+          <a href="#" onclick="clearActivityLog();return false;" style="color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:10px;text-decoration:underline;">clear</a>
+        </div>
+        <div id="activity-log" style="font-family:'JetBrains Mono',monospace;font-size:10.5px;line-height:1.5;background:#0e0e0e;border:1px solid var(--line);padding:10px 12px;border-radius:4px;max-height:280px;overflow:auto;"></div>
+      </div>
     </div>
   </div>
 
@@ -1752,6 +1760,44 @@ async function qDel(id)  { const s = await qTx('readwrite'); return new Promise(
 
 let _qProcessing = false;
 
+// ============================================================
+// ACTIVITY LOG — visible breadcrumb of every queue step so users
+// can see what processQueue did and where it stopped.
+// ============================================================
+const ACT_LOG_KEY = 'hcw_activity_log_v1';
+const ACT_LOG_MAX = 120;
+let _actLog = (() => { try { return JSON.parse(localStorage.getItem(ACT_LOG_KEY) || '[]'); } catch { return []; } })();
+function actLog(level, msg) {
+  const e = { t: new Date().toISOString(), level, msg: String(msg).slice(0, 400) };
+  _actLog.push(e);
+  if (_actLog.length > ACT_LOG_MAX) _actLog = _actLog.slice(-ACT_LOG_MAX);
+  try { localStorage.setItem(ACT_LOG_KEY, JSON.stringify(_actLog)); } catch {}
+  if (document.getElementById('screen-queue')?.classList.contains('active')) renderActivityLog();
+}
+function clearActivityLog() {
+  _actLog = [];
+  try { localStorage.removeItem(ACT_LOG_KEY); } catch {}
+  renderActivityLog();
+}
+function renderActivityLog() {
+  const el = document.getElementById('activity-log');
+  if (!el) return;
+  if (!_actLog.length) {
+    el.innerHTML = '<div style="color:var(--muted);padding:8px 0;">No activity recorded yet. Trigger an upload or tap Retry to populate.</div>';
+    return;
+  }
+  el.innerHTML = _actLog.slice().reverse().map(e => {
+    const colors = { info:'#9fd1ff', ok:'#9fe0a8', warn:'#ffd97a', err:'#ff9a9a' };
+    const t = e.t.slice(11, 19);
+    return `<div style="padding:2px 0;color:${colors[e.level] || '#ccc'};">[${t}] ${escapeHtml(e.msg)}</div>`;
+  }).join('');
+}
+
+function queueLogSummary() {
+  // Compact diagnostic that prefixes uploadJob entries.
+  return '';
+}
+
 async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMime }) {
   const job = {
     reportId,
@@ -1770,23 +1816,30 @@ async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMim
     queuedAt: new Date().toISOString(),
   };
   await qPut(job);
+  const sizes = Object.entries(job.files).map(([k,b]) => `${k} ${formatBytes(b?.size||0)}`).join(' + ');
+  actLog('info', `queued ${reportId} (${sizes})`);
   updateQueueBadge();
   processQueue();
   return job;
 }
 
 async function processQueue() {
-  if (_qProcessing) return;
-  if (!navigator.onLine) { updateQueueBadge(); return; }
+  if (_qProcessing) { actLog('info', 'tick skipped — already processing'); return; }
+  if (!navigator.onLine) { actLog('warn', 'tick skipped — offline'); updateQueueBadge(); return; }
   _qProcessing = true;
   try {
     const jobs = await qAll();
+    if (!jobs.length) { actLog('info', 'tick — queue empty'); return; }
+    actLog('info', `tick — ${jobs.length} job(s)`);
     for (const job of jobs) {
       try {
         await uploadJob(job);
+        actLog('ok', `${job.reportId} uploaded`);
       } catch (e) {
+        const msg = String(e.message || e);
         console.warn('Upload failed for', job.reportId, e);
-        await qPut({ ...job, status: 'failed', lastError: String(e.message || e), attempts: (job.attempts || 0) + 1 });
+        actLog('err', `${job.reportId} FAIL — ${msg}`);
+        await qPut({ ...job, status: 'failed', lastError: msg, attempts: (job.attempts || 0) + 1 });
       }
       updateQueueBadge();
     }
@@ -1913,24 +1966,31 @@ async function uploadJob(job) {
   }
   await qPut({ ...job, status: 'uploading' });
   const kinds = Object.keys(job.files).filter(k => !job.uploadedKeys?.[k]);
+  actLog('info', `${job.reportId} attempt ${(job.attempts||0)+1}, kinds=[${kinds.join(',')}]`);
 
   if (kinds.length) {
     let r;
+    actLog('info', `${job.reportId} → POST /api/presign-upload`);
     try {
       r = await xhrPostJsonRetry('/api/presign-upload',
         { reportId: job.reportId, files: kinds, mimes: job.mimes || {} },
         API_TIMEOUT_MS);
     } catch (e) {
+      actLog('err', `${job.reportId} presign threw — ${e.message || e}`);
       throw new Error(`presign-upload ${e.name === 'TimeoutError' ? 'timed out' : 'failed: ' + (e.message || e)}`);
     }
     if (r.status === 401) {
+      actLog('err', `${job.reportId} presign 401 (session expired)`);
       handleAuthExpired();
       throw new Error('presign-upload 401 — session expired. Sign in again and the upload will resume automatically.');
     }
     if (r.status < 200 || r.status >= 300) {
+      actLog('err', `${job.reportId} presign HTTP ${r.status}`);
       throw new Error('presign-upload ' + r.status + (r.body ? ' — ' + r.body.slice(0, 200) : ''));
     }
     const uploads = (r.json && r.json.uploads) || {};
+    const sampleUrl = (Object.values(uploads)[0] || {}).url || '';
+    actLog('info', `${job.reportId} presign ok, target=${sampleUrl.startsWith('/api/proxy-upload') ? 'PROXY' : 'r2-direct'}`);
 
     const uploadedKeys = { ...(job.uploadedKeys || {}) };
     const kindErrors = [];
@@ -1942,6 +2002,7 @@ async function uploadJob(job) {
       // overrides if blob.type carries ;codecs=... So re-wrap with the
       // exact content type the URL was signed with.
       const upBlob = blob.type === u.contentType ? blob : new Blob([blob], { type: u.contentType });
+      actLog('info', `${job.reportId} → PUT ${kind} (${formatBytes(upBlob.size)} ${u.contentType})`);
       try {
         const put = await xhrPut(u.url, upBlob, u.contentType, PUT_TIMEOUT_MS);
         if (put.status < 200 || put.status >= 300) {
@@ -1951,13 +2012,13 @@ async function uploadJob(job) {
         uploadedKeys[kind] = u.key;
         await qPut({ ...job, uploadedKeys, status: 'uploading' });
         job.uploadedKeys = uploadedKeys;
+        actLog('ok', `${job.reportId} PUT ${kind} ok (${put.status})`);
       } catch (e) {
-        // Don't fail-fast: record this kind's error and keep trying the rest
-        // so a flaky pdf doesn't block the (more important) video upload.
         const msg = e.name === 'TimeoutError'
           ? `PUT ${kind} timed out after ${Math.round(PUT_TIMEOUT_MS/1000)}s (${formatBytes(blob.size)})`
           : (e.message && e.message.startsWith('PUT ')) ? e.message
           : `PUT ${kind} network error: ${e.message || e}`;
+        actLog('err', `${job.reportId} ${msg}`);
         kindErrors.push(msg);
       }
     }
@@ -1965,6 +2026,7 @@ async function uploadJob(job) {
   }
 
   let fin;
+  actLog('info', `${job.reportId} → POST /api/finalize-report`);
   try {
     fin = await xhrPostJsonRetry('/api/finalize-report', {
       reportId: job.reportId,
@@ -1972,15 +2034,19 @@ async function uploadJob(job) {
       uploadedKeys: job.uploadedKeys,
     }, API_TIMEOUT_MS);
   } catch (e) {
+    actLog('err', `${job.reportId} finalize threw — ${e.message || e}`);
     throw new Error(`finalize-report ${e.name === 'TimeoutError' ? 'timed out' : 'failed: ' + (e.message || e)}`);
   }
   if (fin.status === 401) {
+    actLog('err', `${job.reportId} finalize 401 (session expired)`);
     handleAuthExpired();
     throw new Error('finalize-report 401 — session expired. Sign in again and the upload will resume automatically.');
   }
   if (fin.status < 200 || fin.status >= 300) {
+    actLog('err', `${job.reportId} finalize HTTP ${fin.status}`);
     throw new Error('finalize-report ' + fin.status + (fin.body ? ' — ' + fin.body.slice(0, 200) : ''));
   }
+  actLog('ok', `${job.reportId} finalize ok`);
 
   await qDel(job.reportId);
 }
@@ -2053,6 +2119,7 @@ function showQueue() {
   show('queue');
   renderQueueScreen();
   renderDiagInfo();
+  renderActivityLog();
 }
 
 async function renderQueueScreen() {
