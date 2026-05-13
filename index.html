@@ -730,6 +730,11 @@
       <div class="report-summary" id="report-summary"></div>
       <h3 style="font-family:'Bungee',cursive;color:var(--yellow);font-size:14px;letter-spacing:0.05em;margin:18px 0 10px;">EXTERIOR FINDINGS</h3>
       <div class="findings" id="findings-ext"></div>
+      <div id="annotated-section" style="display:none;margin-top:18px;">
+        <h3 style="font-family:'Bungee',cursive;color:var(--yellow);font-size:14px;letter-spacing:0.05em;margin:0 0 10px;">DAMAGE — ANNOTATED</h3>
+        <div id="annotated-frames" style="display:flex;flex-direction:column;gap:14px;"></div>
+        <div id="damage-crops" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;"></div>
+      </div>
       <h3 style="font-family:'Bungee',cursive;color:var(--yellow);font-size:14px;letter-spacing:0.05em;margin:18px 0 10px;">INTERIOR FINDINGS</h3>
       <div class="findings" id="findings-int"></div>
       <details>
@@ -792,6 +797,8 @@ const state = {
   videoMime: '',
   exteriorFrames: [],
   interiorFrames: [],
+  annotatedFrames: [],   // [{ frameIndex, dataUrl, damageIdxs }]
+  damageCrops:     [],   // [{ damageIdx, dataUrl, frameIndex }]
   analysis: null,
   pdfBlob: null,
   reportName: '',
@@ -1298,6 +1305,8 @@ async function analyzeWithClaude(frames, prompt) {
 
 const EXTERIOR_PROMPT = `You are inspecting frames from a car wash pre-service vehicle walk-around video. The frames show the EXTERIOR of a single vehicle.
 
+The user will send N image frames in order. Frame 0 is the first image, frame 1 the second, etc.
+
 Respond ONLY with valid JSON, no preamble, no markdown fences. Use this exact schema:
 
 {
@@ -1317,17 +1326,34 @@ Respond ONLY with valid JSON, no preamble, no markdown fences. Use this exact sc
   },
   "damage": [
     {
-      "type": "scratch|dent|chip|crack|paint_damage|missing_part|rust|other",
+      "type": "scratch|dent|chip|crack|paint_damage|bumper_damage|glass_damage|broken_light|rust|missing_part|wheel_damage|panel_misalignment|other",
       "location": "panel/area description (e.g. 'driver-side rear door, lower section')",
+      "side": "front|rear|driver|passenger|hood|roof|trunk|wheel|other",
       "severity": "minor|moderate|severe",
-      "description": "1 sentence"
+      "area_pct": "approximate percentage of the visible panel that is damaged, as a number 0-100",
+      "label": "very short label for on-image annotation, max 4 words (e.g. 'Front bumper scratch', 'Driver fender dent')",
+      "description": "1 sentence",
+      "confidence": "high|medium|low",
+      "frame_index": "the integer index of the frame (0-based) where this damage is most clearly visible",
+      "bbox": {
+        "x": "left edge of the bounding box around the damage, normalized 0..1 of the frame width",
+        "y": "top edge of the bounding box, normalized 0..1 of the frame height",
+        "w": "box width, normalized 0..1 of frame width",
+        "h": "box height, normalized 0..1 of frame height"
+      }
     }
   ],
   "overall_condition": "excellent|good|fair|poor",
   "summary": "one short sentence overall"
 }
 
-If no visible damage, return an empty array for "damage". Be conservative — only flag what is clearly visible. Glare, water beads, or shadow are NOT damage. Only return a VIN when you can read all 17 characters; partial reads should be null.`;
+Rules:
+- If no visible damage, return an empty array for "damage".
+- Be conservative — only flag what is clearly visible. Glare, water beads, dirt, shadows, and reflections are NOT damage.
+- For every damage entry the "bbox" must tightly enclose the damaged area in the frame referenced by "frame_index", in normalized 0..1 coordinates where x/y is the top-left corner.
+- "frame_index" must be a non-negative integer less than the number of frames provided.
+- Only return a VIN when you can read all 17 characters; partial reads should be null.
+- "label" is what we will print directly onto the image, so keep it short and human-readable.`;
 
 const INTERIOR_PROMPT = `You are inspecting frames from a car wash interior video. The frames show the INSIDE of a vehicle.
 
@@ -1362,6 +1388,167 @@ function safeParseJson(text) {
     try { return JSON.parse(m[0]); } catch {}
   }
   return null;
+}
+
+// ============================================================
+// DAMAGE ANNOTATION — draws bounding boxes, labels and arrows onto
+// each frame so the report looks like an insurance inspection.
+// ============================================================
+const DAMAGE_PALETTE = {
+  minor:    { stroke: '#FFD400', fill: 'rgba(255,212,0,0.18)', text: '#0A0A0A' },
+  moderate: { stroke: '#FF9A2E', fill: 'rgba(255,154,46,0.22)', text: '#0A0A0A' },
+  severe:   { stroke: '#FF3030', fill: 'rgba(255,48,48,0.25)', text: '#FFFFFF' },
+};
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+function damageLabelText(d, fallbackIdx) {
+  if (d.label) return String(d.label);
+  const t = (d.type || 'damage').replace(/_/g, ' ');
+  const loc = d.side || (d.location ? d.location.split(',')[0] : '');
+  const head = loc ? `${loc} ${t}` : t;
+  return `#${fallbackIdx + 1} ${head}`.slice(0, 64);
+}
+
+function clampBbox(b, w, h) {
+  if (!b) return null;
+  const x = Math.max(0, Math.min(1, +b.x));
+  const y = Math.max(0, Math.min(1, +b.y));
+  const ww = Math.max(0, Math.min(1 - x, +b.w));
+  const hh = Math.max(0, Math.min(1 - y, +b.h));
+  if (!isFinite(x + y + ww + hh) || ww <= 0 || hh <= 0) return null;
+  return { x: x * w, y: y * h, w: ww * w, h: hh * h };
+}
+
+// Returns { dataUrl, indexLabel, crops: [{ damageIdx, dataUrl }] } for
+// a single annotated frame. crops are zoom-ins of each damage box.
+async function annotateFrame(srcDataUrl, damagesWithIdx) {
+  const img = await loadImage(srcDataUrl);
+  const W = img.naturalWidth, H = img.naturalHeight;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, W, H);
+
+  // Line/text sizing scales with the image so labels stay legible at
+  // both 1080p and lower-res Safari recordings.
+  const baseStroke = Math.max(3, Math.round(Math.min(W, H) * 0.005));
+  const fontPx     = Math.max(16, Math.round(Math.min(W, H) * 0.028));
+  ctx.font = `700 ${fontPx}px Manrope, Arial, sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.lineJoin = 'miter';
+
+  const crops = [];
+  for (const { damage, idx } of damagesWithIdx) {
+    const box = clampBbox(damage.bbox, W, H);
+    if (!box) continue;
+    const palette = DAMAGE_PALETTE[damage.severity] || DAMAGE_PALETTE.moderate;
+
+    // Tinted fill behind the box so the damaged area pops, then the
+    // hard stroke on top.
+    ctx.fillStyle = palette.fill;
+    ctx.fillRect(box.x, box.y, box.w, box.h);
+    ctx.strokeStyle = palette.stroke;
+    ctx.lineWidth = baseStroke;
+    ctx.strokeRect(box.x, box.y, box.w, box.h);
+
+    // Numbered marker disk in the top-left of the box for cross-ref
+    // with the damage list in the report.
+    const num = String(idx + 1);
+    const r = fontPx * 0.9;
+    const cx = box.x + r + baseStroke;
+    const cy = box.y + r + baseStroke;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = palette.stroke;
+    ctx.fill();
+    ctx.lineWidth = Math.max(2, baseStroke * 0.6);
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+    ctx.fillStyle = palette.text;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(num, cx, cy + 1);
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'top';
+
+    // Label pill placed above the box (or below if it would clip).
+    const label = damageLabelText(damage, idx);
+    const padX = fontPx * 0.5, padY = fontPx * 0.3;
+    const textW = ctx.measureText(label).width;
+    const pillW = textW + padX * 2;
+    const pillH = fontPx + padY * 2;
+    let pillX = box.x;
+    let pillY = box.y - pillH - baseStroke;
+    if (pillY < 0) pillY = box.y + box.h + baseStroke;
+    if (pillX + pillW > W) pillX = W - pillW;
+    if (pillX < 0) pillX = 0;
+    ctx.fillStyle = palette.stroke;
+    ctx.fillRect(pillX, pillY, pillW, pillH);
+    ctx.fillStyle = palette.text;
+    ctx.fillText(label, pillX + padX, pillY + padY);
+
+    // Zoom crop with a small margin around the bbox.
+    crops.push({ damageIdx: idx, dataUrl: cropAround(img, box, W, H) });
+  }
+
+  return { dataUrl: canvas.toDataURL('image/jpeg', 0.9), crops };
+}
+
+function cropAround(img, box, W, H) {
+  const pad = Math.max(box.w, box.h) * 0.4;
+  const x = Math.max(0, box.x - pad);
+  const y = Math.max(0, box.y - pad);
+  const w = Math.min(W - x, box.w + pad * 2);
+  const h = Math.min(H - y, box.h + pad * 2);
+  // Cap the long side so the crop is sharper than 1:1 when source is huge.
+  const targetLong = 640;
+  const scale = Math.min(1, targetLong / Math.max(w, h));
+  const cw = Math.round(w * scale);
+  const ch = Math.round(h * scale);
+  const c = document.createElement('canvas');
+  c.width = cw; c.height = ch;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, x, y, w, h, 0, 0, cw, ch);
+  return c.toDataURL('image/jpeg', 0.9);
+}
+
+// Group damages by frame_index and render annotated frames for every
+// frame that has at least one bbox. Returns:
+//   { annotated: [{ frameIndex, dataUrl, damageIdxs }],
+//     crops:     [{ damageIdx, dataUrl, frameIndex }] }
+async function buildAnnotations(frames, damages) {
+  if (!Array.isArray(frames) || !Array.isArray(damages) || !damages.length) {
+    return { annotated: [], crops: [] };
+  }
+  const byFrame = new Map();
+  damages.forEach((d, idx) => {
+    if (!d || !d.bbox) return;
+    const fi = Number.isInteger(+d.frame_index) ? +d.frame_index : 0;
+    if (fi < 0 || fi >= frames.length) return;
+    if (!byFrame.has(fi)) byFrame.set(fi, []);
+    byFrame.get(fi).push({ damage: d, idx });
+  });
+  const annotated = [];
+  const crops = [];
+  for (const fi of [...byFrame.keys()].sort((a, b) => a - b)) {
+    try {
+      const { dataUrl, crops: frameCrops } = await annotateFrame(frames[fi], byFrame.get(fi));
+      annotated.push({ frameIndex: fi, dataUrl, damageIdxs: byFrame.get(fi).map(x => x.idx) });
+      for (const c of frameCrops) crops.push({ ...c, frameIndex: fi });
+    } catch (e) {
+      console.warn('annotateFrame failed for', fi, e);
+    }
+  }
+  return { annotated, crops };
 }
 
 // ============================================================
@@ -1421,6 +1608,20 @@ async function processInspection(videoBlob) {
     interiorRaw: '',
   };
 
+  // Draw bounding boxes + labels onto frames that actually have damage.
+  // Never let an annotation failure block the report — fall back to
+  // unannotated frames if anything throws.
+  try {
+    const dmg = (exteriorAnalysis && exteriorAnalysis.damage) || [];
+    const { annotated, crops } = await buildAnnotations(frames, dmg);
+    state.annotatedFrames = annotated;
+    state.damageCrops     = crops;
+  } catch (e) {
+    console.warn('buildAnnotations failed:', e);
+    state.annotatedFrames = [];
+    state.damageCrops     = [];
+  }
+
   // Name the report by plate if AI got one; otherwise timestamp.
   const plate = (exteriorAnalysis.license_plate && exteriorAnalysis.license_plate.number)
     ? sanitizeName(exteriorAnalysis.license_plate.number)
@@ -1454,6 +1655,111 @@ function drawFrameSectionHeader(doc, title, W, M) {
   doc.setFontSize(14);
   doc.setFont('helvetica', 'bold');
   doc.text(title, M, 32);
+}
+
+async function renderAnnotatedDamageSection(doc, annotated, crops, damages, geom) {
+  const { W, H, M } = geom;
+  if (!annotated || !annotated.length) return;
+  const title = 'DAMAGE — ANNOTATED';
+  const headerH = 50;
+  const topY = headerH + 20;
+  const footerReserve = 40;
+  const captionLine = 12;
+  const captionPad  = 8;
+  const bottomLimit = H - footerReserve;
+  const maxW = W - 2 * M;
+
+  doc.addPage();
+  drawFrameSectionHeader(doc, title, W, M);
+  let y = topY;
+  let isFirstOnPage = true;
+
+  for (const a of annotated) {
+    const aspect = await firstFrameAspect([a.dataUrl]);
+    let drawW = maxW;
+    let drawH = drawW / aspect;
+    // Reserve space for caption lines (one per damage on this frame).
+    const captions = (a.damageIdxs || []).map(idx => {
+      const d = damages[idx] || {};
+      const sev = (d.severity || '').toUpperCase();
+      const side = d.side ? ` · ${(d.side).toUpperCase()}` : '';
+      const lbl = damageLabelText(d, idx);
+      return `#${idx + 1}  ${lbl}  (${sev}${side})`;
+    });
+    const captionBlockH = captions.length ? (captionPad + captions.length * captionLine + captionPad) : 0;
+    if (drawH + captionBlockH > bottomLimit - topY) {
+      // Shrink to fit the page if a single frame would overflow.
+      drawH = (bottomLimit - topY) - captionBlockH;
+      drawW = drawH * aspect;
+    }
+    if (!isFirstOnPage && y + drawH + captionBlockH > bottomLimit) {
+      doc.addPage();
+      drawFrameSectionHeader(doc, title + ' (cont.)', W, M);
+      y = topY;
+      isFirstOnPage = true;
+    }
+    const x = (W - drawW) / 2;
+    try { doc.addImage(a.dataUrl, 'JPEG', x, y, drawW, drawH); } catch {}
+    doc.setDrawColor(255, 212, 0);
+    doc.setLineWidth(0.5);
+    doc.rect(x, y, drawW, drawH);
+
+    let cy = y + drawH + captionPad;
+    doc.setTextColor(40, 40, 40);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    for (const line of captions) {
+      doc.text(line, M, cy);
+      cy += captionLine;
+    }
+    y = cy + captionPad;
+    isFirstOnPage = false;
+  }
+
+  // Zoom-crop strip — small thumbnails referenced by #N.
+  if (crops && crops.length) {
+    const colW = 110;
+    const rowGap = 14;
+    const cellGap = 10;
+    const captionH = 18;
+    const startX = M;
+    const cols = Math.max(1, Math.floor((W - 2 * M + cellGap) / (colW + cellGap)));
+    if (y + colW + captionH + rowGap > bottomLimit) {
+      doc.addPage();
+      drawFrameSectionHeader(doc, title + ' (zoom crops)', W, M);
+      y = topY;
+    } else {
+      doc.setTextColor(255, 212, 0);
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'bold');
+      doc.text('ZOOM CROPS', M, y + 12);
+      y += 22;
+    }
+    let col = 0;
+    for (const c of crops) {
+      if (col === 0 && y + colW + captionH > bottomLimit) {
+        doc.addPage();
+        drawFrameSectionHeader(doc, title + ' (zoom crops)', W, M);
+        y = topY;
+      }
+      const x = startX + col * (colW + cellGap);
+      try { doc.addImage(c.dataUrl, 'JPEG', x, y, colW, colW); } catch {}
+      doc.setDrawColor(255, 212, 0);
+      doc.setLineWidth(0.4);
+      doc.rect(x, y, colW, colW);
+      doc.setTextColor(40, 40, 40);
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'normal');
+      const d = damages[c.damageIdx] || {};
+      const caption = `#${c.damageIdx + 1} ${damageLabelText(d, c.damageIdx)}`.slice(0, 28);
+      doc.text(caption, x, y + colW + 10);
+      col++;
+      if (col >= cols) {
+        col = 0;
+        y += colW + captionH + rowGap;
+      }
+    }
+  }
 }
 
 async function renderFrameSection(doc, title, frames, geom) {
@@ -1708,6 +2014,15 @@ async function buildPdf() {
     const lines = doc.splitTextToSize(items, W - 2*M);
     doc.text(lines, M, y + 12);
     y += 14 + lines.length * 11;
+  }
+
+  // ---- ANNOTATED DAMAGE PAGES (only when AI flagged something) ----
+  if (state.annotatedFrames && state.annotatedFrames.length) {
+    try {
+      await renderAnnotatedDamageSection(doc, state.annotatedFrames, state.damageCrops || [], (state.analysis.exterior || {}).damage || [], { W, H, M });
+    } catch (e) {
+      console.warn('renderAnnotatedDamageSection failed:', e);
+    }
   }
 
   // ---- FRAME APPENDIX ----
@@ -2362,11 +2677,43 @@ function renderReport(saveResult) {
   if (damage.length === 0) {
     findExt.innerHTML = `<div class="finding minor"><div class="finding-type">CLEAR</div>No visible exterior damage detected.</div>`;
   } else {
-    findExt.innerHTML = damage.map(d => `
-      <div class="finding ${d.severity || 'minor'}">
-        <div class="finding-type">${escapeHtml((d.type || 'other').toUpperCase())} · ${escapeHtml((d.severity || '').toUpperCase())}</div>
-        <strong>${escapeHtml(d.location || 'Unknown location')}</strong> — ${escapeHtml(d.description || '')}
-      </div>`).join('');
+    findExt.innerHTML = damage.map((d, i) => {
+      const type = (d.type || 'other').replace(/_/g, ' ').toUpperCase();
+      const sev  = (d.severity || '').toUpperCase();
+      const side = d.side ? ` · ${(d.side).toUpperCase()}` : '';
+      const area = (d.area_pct != null && !isNaN(+d.area_pct)) ? ` · ~${Math.round(+d.area_pct)}% area` : '';
+      const conf = d.confidence ? ` <span style="color:#888;">(${d.confidence})</span>` : '';
+      return `
+        <div class="finding ${d.severity || 'minor'}">
+          <div class="finding-type">#${i+1} ${escapeHtml(type)} · ${escapeHtml(sev)}${escapeHtml(side)}${escapeHtml(area)}</div>
+          <strong>${escapeHtml(d.location || 'Unknown location')}</strong> — ${escapeHtml(d.description || '')}${conf}
+        </div>`;
+    }).join('');
+  }
+
+  // Annotated frames + zoom crops
+  const annSection = document.getElementById('annotated-section');
+  const annFrames  = document.getElementById('annotated-frames');
+  const annCrops   = document.getElementById('damage-crops');
+  if (annSection) {
+    if (state.annotatedFrames && state.annotatedFrames.length) {
+      annSection.style.display = '';
+      annFrames.innerHTML = state.annotatedFrames.map(a =>
+        `<img src="${a.dataUrl}" style="width:100%;border:1px solid var(--line);border-radius:4px;background:#000;" />`
+      ).join('');
+      annCrops.innerHTML = (state.damageCrops || []).map(c => {
+        const d = damage[c.damageIdx] || {};
+        const label = d.label || damageLabelText(d, c.damageIdx);
+        return `<div style="width:140px;display:flex;flex-direction:column;gap:4px;">
+          <img src="${c.dataUrl}" style="width:140px;height:140px;object-fit:cover;border:1px solid var(--line);border-radius:4px;background:#000;" />
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#bbb;line-height:1.3;">#${c.damageIdx + 1} ${escapeHtml(label)}</div>
+        </div>`;
+      }).join('');
+    } else {
+      annSection.style.display = 'none';
+      annFrames.innerHTML = '';
+      annCrops.innerHTML = '';
+    }
   }
 
   // Interior findings
@@ -2410,6 +2757,7 @@ function resetApp() {
   state.videoBlob = null;
   state.videoMime = '';
   state.exteriorFrames = []; state.interiorFrames = [];
+  state.annotatedFrames = []; state.damageCrops = [];
   state.analysis = null; state.pdfBlob = null; state.reportName = '';
   const t = document.getElementById('timer-rec'); if (t) t.textContent = '00:00';
   const s = document.getElementById('status-rec'); if (s) s.textContent = '';
