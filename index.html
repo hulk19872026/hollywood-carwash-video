@@ -666,7 +666,7 @@
     <div class="home-actions">
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
       <a class="btn btn-ghost" href="/reports" target="_blank" style="text-decoration:none;">📋 VIEW REPORTS</a>
-      <button class="btn btn-ghost" id="home-queue-btn" style="display:none;" onclick="showQueue()">📤 UPLOAD QUEUE</button>
+      <button class="btn btn-ghost" id="home-queue-btn" onclick="showQueue()">📤 UPLOAD QUEUE</button>
     </div>
     <div id="upload-status" onclick="showQueue()" style="display:none;cursor:pointer;margin-top:18px;padding:14px 16px;border-radius:6px;background:#102a3a;border:1px solid #1f4a66;font-size:13px;font-family:'JetBrains Mono',monospace;color:#fff;"></div>
   </div>
@@ -1995,15 +1995,27 @@ async function updateQueueBadge() {
   const panel   = document.getElementById('upload-status');
   const homeBtn = document.getElementById('home-queue-btn');
   const jobs = await qAll().catch(() => []);
+  const failed    = jobs.filter(j => j.status === 'failed').length;
+  const uploading = jobs.filter(j => j.status === 'uploading').length;
+
+  if (homeBtn) {
+    if (!jobs.length) {
+      homeBtn.textContent = '📤 UPLOAD QUEUE';
+    } else {
+      let label = `📤 UPLOAD QUEUE (${jobs.length}`;
+      if (failed)    label += `, ${failed} failed`;
+      if (uploading) label += `, ${uploading} sending`;
+      label += ')';
+      homeBtn.textContent = label;
+    }
+  }
+
   if (!jobs.length) {
-    if (badge)   badge.style.display = 'none';
-    if (panel)   panel.style.display = 'none';
-    if (homeBtn) homeBtn.style.display = 'none';
+    if (badge) badge.style.display = 'none';
+    if (panel) panel.style.display = 'none';
     if (document.getElementById('screen-queue')?.classList.contains('active')) renderQueueScreen();
     return;
   }
-  const failed    = jobs.filter(j => j.status === 'failed').length;
-  const uploading = jobs.filter(j => j.status === 'uploading').length;
 
   if (badge) {
     badge.style.display = 'flex';
@@ -2012,16 +2024,6 @@ async function updateQueueBadge() {
     if (failed)    label += ` · ${failed} failed`;
     badge.textContent = label;
     badge.style.background = failed ? '#5a1010' : (uploading ? '#3a3a10' : '#102a3a');
-  }
-
-  if (homeBtn) {
-    homeBtn.style.display = '';
-    const total = jobs.length;
-    let label = `📤 UPLOAD QUEUE (${total}`;
-    if (failed)    label += `, ${failed} failed`;
-    if (uploading) label += `, ${uploading} sending`;
-    label += ')';
-    homeBtn.textContent = label;
   }
 
   if (panel) {
