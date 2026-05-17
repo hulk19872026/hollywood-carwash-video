@@ -1716,6 +1716,16 @@ async function processInspection(videoBlob) {
       permanentlyFailed: false,
       lastError: null,
     }));
+    // Confirm both the (pre-existing) video and the freshly-attached PDF
+    // are still readable after the put. Catches the case where attaching
+    // a large PDF pushes the origin over quota and Safari quietly drops
+    // the whole row mid-write.
+    if (pdfRecord) {
+      const verifyExpected = { pdf: pdfRecord };
+      const existingJob = await qGet(provisionalId);
+      if (existingJob?.files?.video) verifyExpected.video = existingJob.files.video;
+      await verifyQueueWrite(provisionalId, verifyExpected);
+    }
     actLog('ok', `${provisionalId} metadata + PDF attached, released for finalize`);
   } catch (e) {
     actLog('err', `${provisionalId} could not attach metadata to queued job: ${e.message || e}`);
@@ -2291,11 +2301,49 @@ async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMim
     metadataPending: !!metadataPending,
   };
   await qPut(job);
+
+  // Self-verify the write actually round-trips. If the browser silently
+  // dropped the buffer (quota exceeded, storage pressure, Safari evicted
+  // mid-put), surface the failure NOW — while we still have the original
+  // blobs in memory — rather than 30s later inside an XHR retry loop.
+  await verifyQueueWrite(reportId, files);
+
   const sizes = Object.entries(job.files).map(([k,b]) => `${k} ${formatBytes(fileRecordSize(b))}`).join(' + ');
   actLog('info', `queued ${reportId} (${sizes})`);
   updateQueueBadge();
   processQueue();
   return job;
+}
+
+async function verifyQueueWrite(reportId, expectedFiles) {
+  const got = await qGet(reportId);
+  if (!got) throw new Error(`queue write verify: ${reportId} not in IndexedDB after put`);
+  for (const [kind, rec] of Object.entries(expectedFiles)) {
+    const storedRec = got.files?.[kind];
+    if (!storedRec) throw new Error(`queue write verify: ${kind} missing from stored job`);
+    const expectedSize = fileRecordSize(rec);
+    const gotSize = fileRecordSize(storedRec);
+    if (expectedSize && gotSize !== expectedSize) {
+      throw new Error(`queue write verify: ${kind} size mismatch (expected ${expectedSize}, got ${gotSize})`);
+    }
+    // Force a byte-level read of the stored data. For ArrayBuffer records
+    // this confirms the bytes are actually resident; for legacy Blob
+    // entries it confirms the blob backing still resolves. If either has
+    // been silently dropped (quota, eviction mid-put), this throws and
+    // we surface it to the caller before pretending the upload is safe.
+    try {
+      if (storedRec.buf) {
+        // ArrayBuffer record: spot-check first byte + (size-1)th byte.
+        const view = new Uint8Array(storedRec.buf);
+        if (view.length > 0) { /* read */ const _ = view[0] | view[view.length - 1]; }
+      } else if (storedRec instanceof Blob && storedRec.size > 0) {
+        const probe = storedRec.slice(0, Math.min(64, storedRec.size));
+        await probe.arrayBuffer();
+      }
+    } catch (e) {
+      throw new Error(`queue write verify: ${kind} bytes unreadable after put: ${e.message || e}`);
+    }
+  }
 }
 
 async function processQueue() {
@@ -2956,11 +3004,31 @@ async function reconcileStuckJobs() {
 }
 
 window.addEventListener('load', async () => {
+  await requestPersistentStorage();
   await reconcileStuckJobs();
   processQueue();
   setInterval(processQueue, 30000);
   fetchBuildTag();
 });
+
+// Ask the browser to make our IndexedDB storage persistent (not subject to
+// eviction under storage pressure). iOS 17+ Safari honours this for sites
+// added to the home screen / used recently; the request is a no-op on
+// browsers that don't expose it. Without persistence, Safari can evict
+// the entire origin's IndexedDB to free space — and a half-evicted DB
+// is exactly the "object can not be found here" failure mode we saw.
+async function requestPersistentStorage() {
+  try {
+    if (navigator.storage && typeof navigator.storage.persist === 'function') {
+      const already = await navigator.storage.persisted?.();
+      if (already) { actLog('info', 'storage: already persistent'); return; }
+      const granted = await navigator.storage.persist();
+      actLog(granted ? 'ok' : 'warn', `storage: persist ${granted ? 'GRANTED' : 'denied (data is evictable)'}`);
+    }
+  } catch (e) {
+    actLog('warn', `storage: persist request failed — ${e.message || e}`);
+  }
+}
 
 let _buildTag = '—';
 async function fetchBuildTag() {
@@ -2982,8 +3050,32 @@ function renderDiagInfo() {
     `online:    ${navigator.onLine ? 'yes' : 'NO'}`,
     `user:      ${(document.getElementById('auth-username-chip')?.textContent) || '(not signed in)'}`,
     `origin:    ${location.origin}`,
+    `storage:   ${_storageDiag || 'querying…'}`,
   ];
   el.textContent = lines.join('\n');
+  // Async-refresh the storage line if it isn't ready yet; renderDiagInfo
+  // is called from multiple paths so this self-heals next paint.
+  if (!_storageDiag) refreshStorageDiag();
+}
+
+let _storageDiag = '';
+async function refreshStorageDiag() {
+  try {
+    let persisted = 'unknown';
+    if (navigator.storage?.persisted) persisted = (await navigator.storage.persisted()) ? 'persistent' : 'evictable';
+    let quota = '';
+    if (navigator.storage?.estimate) {
+      const est = await navigator.storage.estimate();
+      const used = est.usage || 0;
+      const total = est.quota || 0;
+      quota = ` · used ${formatBytes(used)}/${formatBytes(total)}`;
+    }
+    _storageDiag = `${persisted}${quota}`;
+    const el = document.getElementById('diag-info');
+    if (el && document.getElementById('screen-queue')?.classList.contains('active')) renderDiagInfo();
+  } catch (e) {
+    _storageDiag = `query failed: ${e.message || e}`;
+  }
 }
 
 async function runUploadCheck() {
