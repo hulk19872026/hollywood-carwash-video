@@ -290,6 +290,24 @@ function noCache(res) {
 app.get('/', (_req, res) => { noCache(res); res.sendFile(path.join(__dirname, 'index.html')); });
 app.get('/reports', (_req, res) => { noCache(res); res.sendFile(path.join(__dirname, 'reports.html')); });
 
+// PWA assets — manifest + icons. Long-cache the SVGs since they're keyed by
+// path; the manifest is cached only for an hour so a brand swap propagates
+// to home-screen installs within a day without forcing every client to
+// re-fetch a 1 KB JSON on every page view.
+app.get('/manifest.webmanifest', (_req, res) => {
+  res.set('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(__dirname, 'manifest.webmanifest'));
+});
+app.get('/icons/:name', (req, res) => {
+  // Allow only the icon filenames we ship — refuses arbitrary path access.
+  const ok = new Set(['icon.svg', 'icon-maskable.svg']);
+  if (!ok.has(req.params.name)) return res.status(404).end();
+  res.set('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.sendFile(path.join(__dirname, 'icons', req.params.name));
+});
+
 // ============================================================
 //  Auth routes
 // ============================================================

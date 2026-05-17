@@ -1,0 +1,15 @@
+{
+  "name": "Hollywood Car Wash Inspection",
+  "short_name": "HCW Inspect",
+  "description": "Record vehicle walk-around video, capture damage, generate inspection PDFs.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0A0A0A",
+  "theme_color": "#E10600",
+  "icons": [
+    { "src": "/icons/icon.svg",          "sizes": "any", "type": "image/svg+xml", "purpose": "any"      },
+    { "src": "/icons/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

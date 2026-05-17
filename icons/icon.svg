@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Hollywood Car Wash">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E10600"/>
+      <stop offset="1" stop-color="#8C0300"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" ry="96" fill="url(#bg)"/>
+  <rect x="20" y="20" width="472" height="472" rx="80" ry="80" fill="none" stroke="#FFD400" stroke-width="10"/>
+  <polygon points="256,96 304,212 432,212 328,288 368,408 256,332 144,408 184,288 80,212 208,212" fill="#FFD400"/>
+  <text x="256" y="468" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-weight="800" font-size="56" fill="#FFD400" letter-spacing="6">HCW</text>
+</svg>
