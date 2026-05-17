@@ -2241,6 +2241,15 @@ function queueLogSummary() {
 async function blobToFileRecord(blob, fallbackType) {
   const type = (blob && blob.type) || fallbackType || 'application/octet-stream';
   const buf = await blob.arrayBuffer();
+  // Assert the read returned the full blob. iOS WebKit has been seen to
+  // return an ArrayBuffer smaller than blob.size for some blob backings —
+  // that produces a perfectly-sized-looking IDB record whose bytes are
+  // truncated, which then uploads as a "black" video. Surface the
+  // truncation NOW, while the original blob is still in memory, instead
+  // of letting a corrupted upload reach R2.
+  if (buf.byteLength !== blob.size) {
+    throw new Error(`blob.arrayBuffer() returned ${buf.byteLength} bytes for a ${blob.size}-byte blob — partial read, recording can't be saved safely`);
+  }
   return { buf, type, size: blob.size };
 }
 function fileRecordToBlob(rec, contentType) {
@@ -2561,17 +2570,20 @@ function xhrPut(url, body, contentType, timeoutMs, requestId, totalBytes) {
 // everything anyway, but doing it here lets a 50MB video survive a momentary
 // network blip without restarting from byte 0 of a fresh attempt.
 async function xhrPutRetry(url, body, contentType, timeoutMs, requestId, attempts = 3) {
-  // Read the blob into memory ONCE up front. If the blob backing is broken
-  // (stale IndexedDB reference, Safari eviction), this throws immediately —
-  // we'd rather surface that to the user than spend 30s on a stalled XHR
-  // retrying on a body that physically cannot be read.
-  const totalBytes = body && body.size != null ? body.size : null;
-  const buf = await materializeBlob(body);
-
+  // body is already the canonical upload payload — either an ArrayBuffer
+  // straight from the IDB record (the normal path) or, for legacy entries,
+  // an ArrayBuffer we read from a Blob in the caller. We do NOT re-wrap
+  // it in a Blob or call .arrayBuffer() again on it here: a previous
+  // version of this code did that round-trip via materializeBlob() and at
+  // least one iOS WebKit build silently corrupted video bytes through it
+  // (same size, garbled contents — uploads played back black). XHR
+  // transmits ArrayBuffer natively.
+  const totalBytes = body && body.byteLength != null ? body.byteLength
+                   : (body && body.size != null ? body.size : null);
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      const r = await xhrPut(url, buf, contentType, timeoutMs, requestId, totalBytes);
+      const r = await xhrPut(url, body, contentType, timeoutMs, requestId, totalBytes);
       if (r.status >= 500 && r.status < 600 && i < attempts - 1) {
         lastErr = new Error(`PUT HTTP ${r.status}`);
       } else {
@@ -2691,19 +2703,35 @@ async function uploadJob(job) {
       const u = uploads[kind];
       const rec = job.files[kind];
       if (!u || !rec) continue;
-      // Reconstruct a fresh Blob from the stored ArrayBuffer record. Legacy
-      // entries that still hold a raw Blob get wrapped if their type doesn't
-      // match what the URL was signed with.
-      const upBlob = fileRecordToBlob(rec, u.contentType);
-      if (!upBlob) {
+      // Send the stored bytes DIRECTLY. We previously wrapped them in a
+      // new Blob and then materializeBlob() would re-read that Blob into
+      // an ArrayBuffer for xhr.send — at least one iOS WebKit build was
+      // observed to corrupt video bytes through that Blob→ArrayBuffer→Blob
+      // →ArrayBuffer round-trip even though sizes matched on every side
+      // (uploads produced black playback). XHR accepts ArrayBuffer
+      // natively, so skip the dance: hand it the buffer we stored.
+      let upBody;
+      let sz;
+      if (rec.buf instanceof ArrayBuffer) {
+        upBody = rec.buf;
+        sz = rec.buf.byteLength;
+      } else if (rec instanceof Blob) {
+        // Legacy in-IDB Blob entries. Read once to a fresh ArrayBuffer —
+        // if the read throws (Safari eviction), uploadJob's catch
+        // promotes the job to permanentlyFailed via isBlobLostError.
+        upBody = await rec.arrayBuffer();
+        sz = upBody.byteLength;
+        if (sz !== rec.size) {
+          throw new Error(`legacy blob partial read (${sz}/${rec.size} bytes) — recording is corrupt`);
+        }
+      } else {
         kindErrors.push(`${kind} missing in queue`);
         continue;
       }
-      const sz = fileRecordSize(rec);
       const putRid = makeRequestId(job.reportId, 'put-' + kind);
       actLog('info', `${job.reportId} → PUT ${kind} (${formatBytes(sz)} ${u.contentType}) rid=${putRid}`);
       try {
-        const put = await xhrPutRetry(u.url, upBlob, u.contentType, PUT_TIMEOUT_MS, putRid);
+        const put = await xhrPutRetry(u.url, upBody, u.contentType, PUT_TIMEOUT_MS, putRid);
         if (put.status < 200 || put.status >= 300) {
           const detail = (put.body || '').slice(0, 200);
           throw new Error(`PUT ${kind} returned ${put.status}${detail ? ' — ' + detail : ''} [rid=${put.requestId || putRid}]`);
