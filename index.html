@@ -2,8 +2,20 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Hollywood Car Wash — Vehicle Inspection</title>
+
+<!-- PWA: lets users Add to Home Screen and launch fullscreen, no browser
+     chrome. iOS reads the apple-* tags; Chromium reads the manifest. -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#E10600" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="HCW Inspect" />
+<link rel="apple-touch-icon" href="/icons/icon.svg" />
+<link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Bungee&family=Bungee+Shade&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
@@ -36,7 +48,16 @@
   .app {
     max-width: 1100px;
     margin: 0 auto;
-    padding: 24px 20px 48px;
+    /* The env() insets are 0 in a normal browser tab and only kick in
+       under display-mode: standalone (iOS Add to Home Screen + Chromium
+       PWA), where the status bar / home indicator sit on top of our
+       black-translucent layout. Without these we'd push the header up
+       under the iPhone notch in installed mode. */
+    padding:
+      calc(24px + env(safe-area-inset-top))
+      calc(20px + env(safe-area-inset-right))
+      calc(48px + env(safe-area-inset-bottom))
+      calc(20px + env(safe-area-inset-left));
     min-height: 100vh;
   }
   /* ----- HEADER ----- */
@@ -668,6 +689,12 @@
       <button class="btn btn-primary" onclick="startInspection()">▶ START NEW INSPECTION</button>
       <a class="btn btn-ghost" href="/reports" target="_blank" style="text-decoration:none;">📋 VIEW REPORTS</a>
       <button class="btn btn-ghost" id="home-queue-btn" onclick="showQueue()">📤 UPLOAD QUEUE</button>
+      <!-- Install prompt: hidden by default. Shown when Chromium fires
+           beforeinstallprompt, or when iOS detects we're not already in
+           standalone display mode (iOS gives no install event — user has
+           to Share → Add to Home Screen manually). -->
+      <button id="install-btn" class="btn btn-ghost" onclick="installApp()" style="display:none;">📲 INSTALL ON HOME SCREEN</button>
+      <div id="install-hint" style="display:none;margin-top:8px;padding:10px 12px;border:1px dashed var(--yellow);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--yellow-soft);line-height:1.5;"></div>
     </div>
     <div id="upload-status" onclick="showQueue()" style="display:none;cursor:pointer;margin-top:18px;padding:14px 16px;border-radius:6px;background:#102a3a;border:1px solid #1f4a66;font-size:13px;font-family:'JetBrains Mono',monospace;color:#fff;"></div>
   </div>
@@ -3126,7 +3153,67 @@ window.addEventListener('load', async () => {
   processQueue();
   setInterval(processQueue, 30000);
   fetchBuildTag();
+  setupInstallPrompt();
 });
+
+// PWA install affordance.
+// Chromium-based browsers fire 'beforeinstallprompt' when the manifest +
+// HTTPS + engagement criteria are met; we stash the event and trigger it
+// on tap. iOS Safari/Chrome don't fire this event — there's no programmatic
+// install — so on iOS we just show a hint pointing the user to the Share
+// menu. Hidden entirely once the page is already running standalone.
+let _deferredInstallPrompt = null;
+function isStandalone() {
+  if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+  // iOS legacy signal.
+  if (window.navigator.standalone === true) return true;
+  return false;
+}
+function isIOS() {
+  const ua = navigator.userAgent || '';
+  // iPadOS 13+ identifies as Macintosh but has touch points — catch both.
+  return /iPhone|iPad|iPod/.test(ua) ||
+         (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
+}
+function setupInstallPrompt() {
+  const btn  = document.getElementById('install-btn');
+  const hint = document.getElementById('install-hint');
+  if (!btn || !hint) return;
+  if (isStandalone()) return; // Already installed — nothing to suggest.
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    _deferredInstallPrompt = e;
+    btn.style.display = '';
+    btn.textContent = '📲 INSTALL ON HOME SCREEN';
+  });
+  window.addEventListener('appinstalled', () => {
+    btn.style.display = 'none';
+    hint.style.display = 'none';
+    _deferredInstallPrompt = null;
+  });
+
+  if (isIOS()) {
+    // iOS has no install API. Show step-by-step pointer to Share menu.
+    hint.style.display = '';
+    hint.innerHTML =
+      'On iPhone, tap <strong>Share</strong> (the square with the up-arrow at the ' +
+      'bottom of Safari or in the Chrome ··· menu) then <strong>Add to Home Screen</strong>. ' +
+      'The app launches fullscreen and your uploads keep working in the background.';
+  }
+}
+async function installApp() {
+  if (!_deferredInstallPrompt) return;
+  try {
+    _deferredInstallPrompt.prompt();
+    await _deferredInstallPrompt.userChoice;
+  } catch (e) {
+    console.warn('install prompt failed:', e);
+  }
+  _deferredInstallPrompt = null;
+  const btn = document.getElementById('install-btn');
+  if (btn) btn.style.display = 'none';
+}
 
 // Ask the browser to make our IndexedDB storage persistent (not subject to
 // eviction under storage pressure). iOS 17+ Safari honours this for sites
