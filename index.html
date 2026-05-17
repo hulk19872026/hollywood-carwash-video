@@ -695,6 +695,28 @@
            to Share → Add to Home Screen manually). -->
       <button id="install-btn" class="btn btn-ghost" onclick="installApp()" style="display:none;">📲 INSTALL ON HOME SCREEN</button>
       <div id="install-hint" style="display:none;margin-top:8px;padding:10px 12px;border:1px dashed var(--yellow);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--yellow-soft);line-height:1.5;"></div>
+
+      <!-- Camera permission hint: only relevant once the app is running as
+           an installed PWA. iOS keeps the home-screen app's camera
+           permission separate from Safari's and starts each PWA's slot
+           as "Ask Each Time" — so even after the user grants once, the
+           next launch re-prompts. The fix is a one-time toggle in
+           Settings → the app → Camera. This banner walks them through it. -->
+      <div id="cam-perm-hint" style="display:none;margin-top:8px;padding:12px 14px;border:1px dashed #88c5ff;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#cfe5ff;line-height:1.55;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px;">
+          <strong style="color:#fff;font-size:12px;">🎥 Tired of iOS asking for camera every time?</strong>
+          <a href="#" onclick="dismissCamPermHint();return false;" style="color:#88c5ff;text-decoration:underline;font-size:10px;white-space:nowrap;">dismiss</a>
+        </div>
+        <div>One-time fix on this iPhone:</div>
+        <ol style="margin:6px 0 4px 18px;padding:0;">
+          <li>Open <strong>Settings</strong> on your iPhone</li>
+          <li>Scroll down to <strong>HCW Inspect</strong></li>
+          <li>Tap <strong>Camera</strong> → set to <strong>Allow</strong></li>
+        </ol>
+        <div style="margin-top:6px;color:#88c5ff;">
+          If "HCW Inspect" isn't in Settings yet, record one inspection first (tap Allow when asked). Then it will appear.
+        </div>
+      </div>
     </div>
     <div id="upload-status" onclick="showQueue()" style="display:none;cursor:pointer;margin-top:18px;padding:14px 16px;border-radius:6px;background:#102a3a;border:1px solid #1f4a66;font-size:13px;font-family:'JetBrains Mono',monospace;color:#fff;"></div>
   </div>
@@ -3175,7 +3197,46 @@ window.addEventListener('load', async () => {
   setInterval(processQueue, 30000);
   fetchBuildTag();
   setupInstallPrompt();
+  setupCameraPermissionHint();
 });
+
+// Show the camera-permission hint only when it's actionable: the user is
+// running this as an installed PWA (so the hint's instructions about
+// "Settings → HCW Inspect → Camera" are correct), they haven't dismissed
+// it before, and the browser doesn't already report 'granted' for camera.
+// We re-evaluate on visibility change too, so if the user goes to Settings,
+// flips the toggle, and comes back, the banner hides on its own.
+async function setupCameraPermissionHint() {
+  const el = document.getElementById('cam-perm-hint');
+  if (!el) return;
+  await refreshCameraPermissionHint();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshCameraPermissionHint();
+  });
+}
+async function refreshCameraPermissionHint() {
+  const el = document.getElementById('cam-perm-hint');
+  if (!el) return;
+  if (!isStandalone()) { el.style.display = 'none'; return; }
+  try { if (localStorage.getItem('hcw_cam_hint_dismissed') === '1') { el.style.display = 'none'; return; } } catch {}
+  // If the Permissions API tells us 'granted', the hint isn't useful —
+  // iOS is already persisting. Permissions API on iOS PWAs is unreliable
+  // (often missing / throws), so absence of 'granted' isn't proof of a
+  // problem; we still show the hint in that case as a best-effort tip.
+  let state = null;
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const r = await navigator.permissions.query({ name: 'camera' });
+      state = r.state;
+    } catch {}
+  }
+  el.style.display = state === 'granted' ? 'none' : '';
+}
+function dismissCamPermHint() {
+  try { localStorage.setItem('hcw_cam_hint_dismissed', '1'); } catch {}
+  const el = document.getElementById('cam-perm-hint');
+  if (el) el.style.display = 'none';
+}
 
 // PWA install affordance.
 // Chromium-based browsers fire 'beforeinstallprompt' when the manifest +
