@@ -696,26 +696,16 @@
       <button id="install-btn" class="btn btn-ghost" onclick="installApp()" style="display:none;">📲 INSTALL ON HOME SCREEN</button>
       <div id="install-hint" style="display:none;margin-top:8px;padding:10px 12px;border:1px dashed var(--yellow);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--yellow-soft);line-height:1.5;"></div>
 
-      <!-- Camera permission hint: only relevant once the app is running as
-           an installed PWA. iOS keeps the home-screen app's camera
-           permission separate from Safari's and starts each PWA's slot
-           as "Ask Each Time" — so even after the user grants once, the
-           next launch re-prompts. The fix is a one-time toggle in
-           Settings → the app → Camera. This banner walks them through it. -->
+      <!-- Camera permission hint. Shown on iOS whether or not the app is
+           installed; copy adapts to context (standalone PWA gets the
+           Settings → app path, Safari/Chrome tab gets the Website
+           Settings path + a nudge to install first). -->
       <div id="cam-perm-hint" style="display:none;margin-top:8px;padding:12px 14px;border:1px dashed #88c5ff;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#cfe5ff;line-height:1.55;">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px;">
           <strong style="color:#fff;font-size:12px;">🎥 Tired of iOS asking for camera every time?</strong>
           <a href="#" onclick="dismissCamPermHint();return false;" style="color:#88c5ff;text-decoration:underline;font-size:10px;white-space:nowrap;">dismiss</a>
         </div>
-        <div>One-time fix on this iPhone:</div>
-        <ol style="margin:6px 0 4px 18px;padding:0;">
-          <li>Open <strong>Settings</strong> on your iPhone</li>
-          <li>Scroll down to <strong>HCW Inspect</strong></li>
-          <li>Tap <strong>Camera</strong> → set to <strong>Allow</strong></li>
-        </ol>
-        <div style="margin-top:6px;color:#88c5ff;">
-          If "HCW Inspect" isn't in Settings yet, record one inspection first (tap Allow when asked). Then it will appear.
-        </div>
+        <div id="cam-perm-hint-body"></div>
       </div>
     </div>
     <div id="upload-status" onclick="showQueue()" style="display:none;cursor:pointer;margin-top:18px;padding:14px 16px;border-radius:6px;background:#102a3a;border:1px solid #1f4a66;font-size:13px;font-family:'JetBrains Mono',monospace;color:#fff;"></div>
@@ -3215,14 +3205,16 @@ async function setupCameraPermissionHint() {
   });
 }
 async function refreshCameraPermissionHint() {
-  const el = document.getElementById('cam-perm-hint');
-  if (!el) return;
-  if (!isStandalone()) { el.style.display = 'none'; return; }
+  const el   = document.getElementById('cam-perm-hint');
+  const body = document.getElementById('cam-perm-hint-body');
+  if (!el || !body) return;
+  // Only show on iOS — Android/desktop don't have this PWA-vs-Safari split.
+  if (!isIOS()) { el.style.display = 'none'; return; }
   try { if (localStorage.getItem('hcw_cam_hint_dismissed') === '1') { el.style.display = 'none'; return; } } catch {}
-  // If the Permissions API tells us 'granted', the hint isn't useful —
-  // iOS is already persisting. Permissions API on iOS PWAs is unreliable
-  // (often missing / throws), so absence of 'granted' isn't proof of a
-  // problem; we still show the hint in that case as a best-effort tip.
+  // If the Permissions API tells us camera is already granted, the hint
+  // isn't useful. iOS's Permissions API is unreliable on PWAs and missing
+  // on iOS Safari, so absence of 'granted' isn't proof of a problem — we
+  // still surface the hint as a best-effort tip in that case.
   let state = null;
   if (navigator.permissions && navigator.permissions.query) {
     try {
@@ -3230,7 +3222,38 @@ async function refreshCameraPermissionHint() {
       state = r.state;
     } catch {}
   }
-  el.style.display = state === 'granted' ? 'none' : '';
+  if (state === 'granted') { el.style.display = 'none'; return; }
+
+  // Render copy appropriate to the current launch mode.
+  if (isStandalone()) {
+    body.innerHTML =
+      '<div>One-time fix for this installed app:</div>' +
+      '<ol style="margin:6px 0 4px 18px;padding:0;">' +
+      '<li>Open <strong>Settings</strong> on your iPhone</li>' +
+      '<li>Scroll down to <strong>HCW Inspect</strong></li>' +
+      '<li>Tap <strong>Camera</strong> &rarr; set to <strong>Allow</strong></li>' +
+      '</ol>' +
+      '<div style="margin-top:6px;color:#88c5ff;">' +
+      'If "HCW Inspect" isn\'t in Settings yet, record one inspection first ' +
+      '(tap Allow when iOS asks). Then it will appear.' +
+      '</div>';
+  } else {
+    body.innerHTML =
+      '<div>You\'re in a browser tab. Two options:</div>' +
+      '<div style="margin-top:6px;"><strong style="color:#fff;">A. Install to home screen (recommended)</strong></div>' +
+      '<ol style="margin:4px 0 4px 18px;padding:0;">' +
+      '<li>Tap the <strong>Share</strong> button (square with up-arrow)</li>' +
+      '<li>Tap <strong>Add to Home Screen</strong></li>' +
+      '<li>Launch from the new icon &mdash; then this hint shows step 2</li>' +
+      '</ol>' +
+      '<div style="margin-top:8px;"><strong style="color:#fff;">B. Or make Safari remember</strong></div>' +
+      '<ol style="margin:4px 0 4px 18px;padding:0;">' +
+      '<li>Tap the <strong>aA</strong> icon at the left of the URL bar</li>' +
+      '<li>Tap <strong>Website Settings</strong></li>' +
+      '<li>Set <strong>Camera</strong> to <strong>Allow</strong></li>' +
+      '</ol>';
+  }
+  el.style.display = '';
 }
 function dismissCamPermHint() {
   try { localStorage.setItem('hcw_cam_hint_dismissed', '1'); } catch {}
