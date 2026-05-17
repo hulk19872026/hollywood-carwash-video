@@ -2355,34 +2355,95 @@ const API_TIMEOUT_MS = 30 * 1000;
 // iOS Safari fetch() with PUT + Blob body throws a generic "Load failed" on
 // cellular and offers no progress signal. XHR is more reliable for blob
 // uploads on iOS and exposes status/responseText for diagnostics.
-function xhrPut(url, body, contentType, timeoutMs, requestId) {
+// Convert a Blob to an ArrayBuffer in memory before XHR send. iOS Safari
+// reads a Blob lazily during xhr.send() — if the blob's underlying backing
+// was evicted while the tab was backgrounded (very plausible across a
+// device sleep or several days in the queue), send() reports sent=0 for
+// minutes before the OS-level socket gives up. Reading the bytes upfront
+// forces any blob-backing failure to surface synchronously and hands the
+// XHR a fully-resident buffer that can be written without further reads.
+// Only does this for blobs up to MAX_INMEM_BLOB_BYTES so massive videos
+// don't blow up memory on low-end devices.
+const MAX_INMEM_BLOB_BYTES = 80 * 1024 * 1024;
+async function materializeBlob(body) {
+  if (!body || typeof body.arrayBuffer !== 'function') return body;
+  if (body.size > MAX_INMEM_BLOB_BYTES) return body;
+  try {
+    return await body.arrayBuffer();
+  } catch (e) {
+    throw new Error(`could not read blob for upload (${formatBytes(body.size)}): ${e.message || e}`);
+  }
+}
+
+// PUT_STALL_MS: how long the upload can make zero progress before we treat
+// the socket as wedged and abort. Default 30s — long enough to ride out
+// a slow handshake on a weak cellular signal, short enough that a
+// genuinely-stuck socket retries on a fresh connection within a minute
+// instead of burning the full 5-minute timeout.
+const PUT_STALL_MS = 30_000;
+
+function xhrPut(url, body, contentType, timeoutMs, requestId, totalBytes) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const started = Date.now();
     let sent = 0;
+    let lastProgressAt = Date.now();
+    // Stall detector: if no upload progress for PUT_STALL_MS while the
+    // request is in-flight, abort. iOS Safari and some Railway proxy
+    // configurations can leave a TCP socket "open" with zero bytes moving
+    // through it for many minutes; this turns that silent hang into a
+    // fast retry on a fresh socket.
+    const stallTimer = setInterval(() => {
+      // readyState 1..3 = in-flight (opened, headers sent, body in transit)
+      if (xhr.readyState >= 1 && xhr.readyState < 4 &&
+          Date.now() - lastProgressAt > PUT_STALL_MS) {
+        clearInterval(stallTimer);
+        try { xhr.abort(); } catch {}
+        const dt = ((Date.now() - started) / 1000).toFixed(1);
+        const total = totalBytes != null ? formatBytes(totalBytes) : '?';
+        const err = new Error(`stalled — no upload progress for ${Math.round(PUT_STALL_MS/1000)}s (sent=${formatBytes(sent)}/${total} after ${dt}s on a wedged socket; retrying on a fresh connection)`);
+        err.name = 'StallError';
+        reject(err);
+      }
+    }, 5_000);
+    const cleanup = () => clearInterval(stallTimer);
+
     xhr.open('PUT', url, true);
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader('Content-Type', contentType);
     if (requestId) xhr.setRequestHeader('X-Request-ID', requestId);
-    if (xhr.upload) xhr.upload.onprogress = (e) => { if (e.loaded) sent = e.loaded; };
-    xhr.onload = () => resolve({
-      status: xhr.status,
-      body: xhr.responseText || '',
-      requestId: xhr.getResponseHeader('X-Request-ID') || requestId || null,
-    });
+    if (xhr.upload) xhr.upload.onprogress = (e) => {
+      if (e.loaded) { sent = e.loaded; lastProgressAt = Date.now(); }
+    };
+    xhr.onload = () => {
+      cleanup();
+      resolve({
+        status: xhr.status,
+        body: xhr.responseText || '',
+        requestId: xhr.getResponseHeader('X-Request-ID') || requestId || null,
+      });
+    };
     xhr.onerror = () => {
+      cleanup();
       const dt = ((Date.now() - started) / 1000).toFixed(1);
-      const total = body && body.size != null ? body.size : null;
+      const total = totalBytes != null ? totalBytes : (body && body.size != null ? body.size : null);
       const sentLabel = total ? `${formatBytes(sent)}/${formatBytes(total)}` : formatBytes(sent);
       reject(new Error(`network error (status=${xhr.status} readyState=${xhr.readyState} ${dt}s sent=${sentLabel})`));
     };
     xhr.ontimeout = () => {
+      cleanup();
       const dt = ((Date.now() - started) / 1000).toFixed(1);
       const e = new Error(`timed out after ${dt}s (sent=${formatBytes(sent)})`);
       e.name = 'TimeoutError';
       reject(e);
     };
-    xhr.onabort = () => reject(new Error('aborted'));
+    xhr.onabort = () => {
+      cleanup();
+      // If we aborted ourselves via stall detector, the StallError reject
+      // already fired; this onabort just no-ops. Otherwise (programmatic
+      // or page-unload abort) surface a generic abort.
+      reject(new Error('aborted'));
+    };
     xhr.send(body);
   });
 }
@@ -2392,10 +2453,17 @@ function xhrPut(url, body, contentType, timeoutMs, requestId) {
 // everything anyway, but doing it here lets a 50MB video survive a momentary
 // network blip without restarting from byte 0 of a fresh attempt.
 async function xhrPutRetry(url, body, contentType, timeoutMs, requestId, attempts = 3) {
+  // Read the blob into memory ONCE up front. If the blob backing is broken
+  // (stale IndexedDB reference, Safari eviction), this throws immediately —
+  // we'd rather surface that to the user than spend 30s on a stalled XHR
+  // retrying on a body that physically cannot be read.
+  const totalBytes = body && body.size != null ? body.size : null;
+  const buf = await materializeBlob(body);
+
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      const r = await xhrPut(url, body, contentType, timeoutMs, requestId);
+      const r = await xhrPut(url, buf, contentType, timeoutMs, requestId, totalBytes);
       if (r.status >= 500 && r.status < 600 && i < attempts - 1) {
         lastErr = new Error(`PUT HTTP ${r.status}`);
       } else {
@@ -2403,6 +2471,9 @@ async function xhrPutRetry(url, body, contentType, timeoutMs, requestId, attempt
       }
     } catch (e) {
       lastErr = e;
+      // Stall and network errors retry on a fresh socket. Only a hard
+      // ceiling timeout (5 min) propagates immediately, since that means
+      // the whole attempt window is gone — restarting won't help.
       if (e.name === 'TimeoutError') throw e;
     }
     await new Promise(res => setTimeout(res, backoffDelay(i)));
