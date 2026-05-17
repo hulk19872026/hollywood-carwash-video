@@ -1701,11 +1701,14 @@ async function processInspection(videoBlob) {
         analysis: state.analysis,
         timestamp: now.toISOString(),
       };
+  // Convert the PDF to an ArrayBuffer record now, before the IndexedDB
+  // put — same reasoning as queueForUpload (Safari blob-backing eviction).
+  const pdfRecord = pdfBlob ? await blobToFileRecord(pdfBlob, 'application/pdf') : null;
   try {
     await updateQueueJob(provisionalId, (job) => ({
       ...job,
       metadata: finalMetadata,
-      files: { ...(job.files || {}), ...(pdfBlob ? { pdf: pdfBlob } : {}) },
+      files: { ...(job.files || {}), ...(pdfRecord ? { pdf: pdfRecord } : {}) },
       metadataPending: false,
       // If analysis took long enough that the worker tripped retries on the
       // metadataPending no-op, clear them so finalize starts fresh.
@@ -2162,12 +2165,12 @@ async function qGet(id)  { const s = await qTx('readonly');  return new Promise(
 async function qAll()    { const s = await qTx('readonly');  return new Promise((r,e)=>{const q=s.getAll();q.onsuccess=()=>r(q.result||[]);q.onerror=()=>e(q.error);}); }
 async function qDel(id)  { const s = await qTx('readwrite'); return new Promise((r,e)=>{const q=s.delete(id);q.onsuccess=()=>r();q.onerror=()=>e(q.error);}); }
 
-// Read-modify-write a single job. Used to layer analysis results onto a
-// video that was queued before the analysis ran.
+// Read-modify-write a single job. Mutator may be sync or async so callers
+// can convert blobs to ArrayBuffer records inside it.
 async function updateQueueJob(id, mutator) {
   const current = await qGet(id);
   if (!current) throw new Error(`updateQueueJob: ${id} not in queue`);
-  const next = mutator(current);
+  const next = await mutator(current);
   if (!next || next.reportId !== id) throw new Error(`updateQueueJob: mutator must preserve reportId=${id}`);
   await qPut(next);
 }
@@ -2212,17 +2215,74 @@ function queueLogSummary() {
   return '';
 }
 
+// ============================================================
+// File records — durable storage shape inside IndexedDB.
+//
+// Safari does NOT reliably copy Blob bytes into IndexedDB on a put. It
+// stores a reference to the underlying blob backing in WebKit's blob
+// store, and that backing can be evicted across a tab background, a
+// device sleep, or memory pressure — leaving a valid-looking Blob handle
+// that throws "The object can not be found here" on .arrayBuffer().
+//
+// ArrayBuffers, on the other hand, are structured-cloned byte-for-byte
+// by IndexedDB and survive eviction. So we store {buf, type, size}
+// records, and reconstruct a fresh Blob at upload time.
+// ============================================================
+async function blobToFileRecord(blob, fallbackType) {
+  const type = (blob && blob.type) || fallbackType || 'application/octet-stream';
+  const buf = await blob.arrayBuffer();
+  return { buf, type, size: blob.size };
+}
+function fileRecordToBlob(rec, contentType) {
+  if (!rec) return null;
+  // Legacy entries stored the Blob directly. Honour them but they're at
+  // risk of the Safari eviction bug — uploadJob's catch handler will
+  // detect the read failure and permanently-fail the job so the user
+  // isn't stuck retrying a recording whose bytes are gone.
+  if (rec instanceof Blob) {
+    return contentType && rec.type !== contentType
+      ? new Blob([rec], { type: contentType })
+      : rec;
+  }
+  if (rec.buf) {
+    return new Blob([rec.buf], { type: contentType || rec.type || 'application/octet-stream' });
+  }
+  return null;
+}
+function fileRecordSize(rec) {
+  if (!rec) return 0;
+  if (rec instanceof Blob) return rec.size;
+  return rec.size || (rec.buf && rec.buf.byteLength) || 0;
+}
+function isBlobLostError(err) {
+  const msg = String((err && err.message) || err || '');
+  // Surfaces materializeBlob() failures + the raw Safari/Chrome wording.
+  return msg.includes('could not read blob') ||
+         msg.includes('object can not be found') ||
+         msg.includes('object could not be found') ||
+         msg.includes('NotReadableError');
+}
+
 async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMime, metadataPending }) {
+  // Materialize blobs into ArrayBuffer records BEFORE the IndexedDB put.
+  // If we passed Blobs through, Safari would later lose their backings;
+  // doing the read here also fails fast if the recording is somehow
+  // already broken, rather than 30s later inside an XHR retry loop.
+  const files = {};
+  const mimes = {};
+  if (pdfBlob) {
+    files.pdf = await blobToFileRecord(pdfBlob, 'application/pdf');
+  }
+  if (videoBlob) {
+    const type = videoMime || videoBlob.type || 'video/webm';
+    files.video = await blobToFileRecord(videoBlob, type);
+    mimes.video = type;
+  }
   const job = {
     reportId,
     metadata,
-    files: {
-      ...(pdfBlob   ? { pdf: pdfBlob }     : {}),
-      ...(videoBlob ? { video: videoBlob } : {}),
-    },
-    mimes: {
-      ...(videoBlob ? { video: videoMime || videoBlob.type || 'video/webm' } : {}),
-    },
+    files,
+    mimes,
     uploadedKeys: {},
     status: 'pending',
     attempts: 0,
@@ -2231,7 +2291,7 @@ async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMim
     metadataPending: !!metadataPending,
   };
   await qPut(job);
-  const sizes = Object.entries(job.files).map(([k,b]) => `${k} ${formatBytes(b?.size||0)}`).join(' + ');
+  const sizes = Object.entries(job.files).map(([k,b]) => `${k} ${formatBytes(fileRecordSize(b))}`).join(' + ');
   actLog('info', `queued ${reportId} (${sizes})`);
   updateQueueBadge();
   processQueue();
@@ -2578,16 +2638,22 @@ async function uploadJob(job) {
 
     const uploadedKeys = { ...(job.uploadedKeys || {}) };
     const kindErrors = [];
+    let blobLost = false;
     for (const kind of kinds) {
       const u = uploads[kind];
-      const blob = job.files[kind];
-      if (!u || !blob) continue;
-      // Safari uses blob.type for the request Content-Type and ignores
-      // overrides if blob.type carries ;codecs=... So re-wrap with the
-      // exact content type the URL was signed with.
-      const upBlob = blob.type === u.contentType ? blob : new Blob([blob], { type: u.contentType });
+      const rec = job.files[kind];
+      if (!u || !rec) continue;
+      // Reconstruct a fresh Blob from the stored ArrayBuffer record. Legacy
+      // entries that still hold a raw Blob get wrapped if their type doesn't
+      // match what the URL was signed with.
+      const upBlob = fileRecordToBlob(rec, u.contentType);
+      if (!upBlob) {
+        kindErrors.push(`${kind} missing in queue`);
+        continue;
+      }
+      const sz = fileRecordSize(rec);
       const putRid = makeRequestId(job.reportId, 'put-' + kind);
-      actLog('info', `${job.reportId} → PUT ${kind} (${formatBytes(upBlob.size)} ${u.contentType}) rid=${putRid}`);
+      actLog('info', `${job.reportId} → PUT ${kind} (${formatBytes(sz)} ${u.contentType}) rid=${putRid}`);
       try {
         const put = await xhrPutRetry(u.url, upBlob, u.contentType, PUT_TIMEOUT_MS, putRid);
         if (put.status < 200 || put.status >= 300) {
@@ -2599,15 +2665,30 @@ async function uploadJob(job) {
         job.uploadedKeys = uploadedKeys;
         actLog('ok', `${job.reportId} PUT ${kind} ok (${put.status}) rid=${put.requestId || putRid}`);
       } catch (e) {
+        if (isBlobLostError(e)) blobLost = true;
         const msg = e.name === 'TimeoutError'
-          ? `PUT ${kind} timed out after ${Math.round(PUT_TIMEOUT_MS/1000)}s (${formatBytes(blob.size)})`
+          ? `PUT ${kind} timed out after ${Math.round(PUT_TIMEOUT_MS/1000)}s (${formatBytes(sz)})`
           : (e.message && e.message.startsWith('PUT ')) ? e.message
           : `PUT ${kind} network error: ${e.message || e}`;
         actLog('err', `${job.reportId} ${msg}`);
         kindErrors.push(msg);
       }
     }
-    if (kindErrors.length) throw new Error(kindErrors.join(' | '));
+    if (kindErrors.length) {
+      // If the recording bytes themselves are gone from browser storage,
+      // retrying won't help — surface that as a terminal failure on this
+      // job immediately so the user knows to delete it rather than burn
+      // through MAX_UPLOAD_ATTEMPTS waiting on bytes that don't exist.
+      if (blobLost) {
+        await qPut({
+          ...job,
+          status: 'failed',
+          permanentlyFailed: true,
+          lastError: `Recording was lost from browser storage (${kindErrors.join(' | ')}). The bytes are gone — delete this job. Fixed in newer recordings: they're now stored as ArrayBuffer and survive Safari's storage eviction.`,
+        });
+      }
+      throw new Error(kindErrors.join(' | '));
+    }
   }
 
   // Hold off on finalize while the foreground analysis is still running.
@@ -2753,15 +2834,17 @@ async function renderQueueScreen() {
 
   listEl.innerHTML = jobs.map(j => {
     const allUploaded = Object.keys(j.files || {}).every(k => j.uploadedKeys?.[k]);
+    const blobLost = j.permanentlyFailed && isBlobLostError(j.lastError);
     const statusBadge =
-        j.permanentlyFailed                        ? '<span style="color:#ff5050;">⛔ NEEDS MANUAL RETRY</span>'
+        blobLost                                   ? '<span style="color:#ff5050;">💀 RECORDING LOST — DELETE</span>'
+      : j.permanentlyFailed                        ? '<span style="color:#ff5050;">⛔ NEEDS MANUAL RETRY</span>'
       : (j.metadataPending && allUploaded)         ? '<span style="color:#9fd1ff;">🧠 VIDEO UPLOADED · WAITING FOR ANALYSIS</span>'
       : j.metadataPending                          ? '<span style="color:#9fd1ff;">🧠 UPLOADING VIDEO · ANALYSIS IN PROGRESS</span>'
       : j.status === 'uploading'                   ? '<span style="color:#ffd400;">⏳ SENDING</span>'
       : j.status === 'failed'                      ? '<span style="color:#ff9a9a;">⚠ RETRYING</span>'
                                                    : '<span style="color:#88c5ff;">… QUEUED</span>';
     const filesInfo = Object.entries(j.files || {})
-      .map(([k, b]) => `${k} ${formatBytes(b?.size || 0)}`).join(' + ') || '—';
+      .map(([k, b]) => `${k} ${formatBytes(fileRecordSize(b))}`).join(' + ') || '—';
     const mimes = j.mimes ? Object.entries(j.mimes).map(([k,v]) => `${k}=${v}`).join('  ') : '';
     const when = j.queuedAt ? new Date(j.queuedAt).toLocaleString() : '';
     const err  = j.lastError
