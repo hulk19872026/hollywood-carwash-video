@@ -1083,9 +1083,73 @@ function stopCamera() {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
 }
 
+// Decode one frame from a freshly-recorded blob and return the average
+// luminance (0..255). Returns null if the video can't be decoded — caller
+// should treat that as inconclusive, not as a black frame. Hard 4s ceiling
+// so a wedged decoder doesn't block submit indefinitely.
+async function sampleAverageBrightness(blob) {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.setAttribute('muted', '');
+    video.setAttribute('playsinline', '');
+    video.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;';
+    document.body.appendChild(video);
+    const url = URL.createObjectURL(blob);
+    video.src = url;
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      try { URL.revokeObjectURL(url); } catch {}
+      if (video.parentNode) video.parentNode.removeChild(video);
+      resolve(val);
+    };
+    setTimeout(() => finish(null), 4000);
+    video.addEventListener('error', () => finish(null));
+    video.addEventListener('loadeddata', async () => {
+      try {
+        // Seek to ~1s in to dodge the warmup window where some encoders
+        // emit a black or solid-colour initial frame even on healthy hardware.
+        const dur = isFinite(video.duration) && video.duration > 0 ? video.duration : 2;
+        video.currentTime = Math.min(1, dur * 0.5);
+        await new Promise((r) => { video.addEventListener('seeked', r, { once: true }); });
+        const w = video.videoWidth  || 320;
+        const h = video.videoHeight || 240;
+        // Downsample hard — we only need an average. 64x36 is plenty.
+        const cw = 64, ch = 36;
+        const canvas = document.createElement('canvas');
+        canvas.width = cw; canvas.height = ch;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, cw, ch);
+        const data = ctx.getImageData(0, 0, cw, ch).data;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          // Rec. 601 luma.
+          sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        }
+        finish(sum / (cw * ch));
+      } catch {
+        finish(null);
+      }
+    });
+    try { video.load(); } catch {}
+  });
+}
+
 function pickRecorderMime() {
+  // We capture getUserMedia({audio: false}) — only a video track. Asking the
+  // recorder for "video/mp4;codecs=avc1,mp4a" declares an audio codec for a
+  // track that doesn't exist; iOS WebKit (used by both Safari and Chrome on
+  // iOS) has been seen to silently produce MP4s with valid duration metadata
+  // but empty/black video tracks in that configuration. Stick to video
+  // codecs only. avc1.42E01E is H.264 Constrained Baseline — the most
+  // broadly decodable profile across iOS/macOS/desktop browsers.
   const candidates = [
-    'video/mp4;codecs=avc1,mp4a',
+    'video/mp4;codecs=avc1.42E01E',
+    'video/mp4;codecs=avc1',
     'video/mp4',
     'video/webm;codecs=vp9',
     'video/webm;codecs=vp8',
@@ -1588,6 +1652,31 @@ async function stopAndSubmit() {
     if (submitBtn) submitBtn.disabled = false;
     alert('No video was recorded. Please try again — make sure you start recording before pressing Send.');
     return;
+  }
+
+  // Quick black-frame sanity check. iOS WebKit MediaRecorder has historically
+  // shipped builds where it produces MP4s with valid duration metadata but
+  // empty/black video tracks — the file uploads "successfully" and the user
+  // doesn't discover it until they open the report. Sample one frame from
+  // the middle of the recording: if it's effectively all-black, refuse to
+  // submit so the user can retry now while the camera is still set up.
+  try {
+    const brightness = await sampleAverageBrightness(blob);
+    if (brightness != null && brightness < 6) {
+      if (submitBtn) submitBtn.disabled = false;
+      alert(
+        'The recording came out black (avg brightness ' + brightness.toFixed(1) + '/255).\n\n' +
+        "This is usually a known iOS browser quirk where the camera preview shows correctly but the saved video is blank. " +
+        "Please try again — and if it happens twice in a row, force-quit the browser and reopen it before recording."
+      );
+      return;
+    }
+    actLog('info', `recording brightness ok (avg ${brightness == null ? '?' : brightness.toFixed(1)}/255)`);
+  } catch (e) {
+    // A sample failure isn't fatal — let the upload proceed and the queue
+    // will surface any downstream issues.
+    console.warn('brightness sample failed:', e);
+    actLog('warn', `brightness sample skipped: ${e.message || e}`);
   }
 
   // Send analysis off to the background and bounce back to home immediately.
