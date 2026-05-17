@@ -704,8 +704,8 @@
     <div class="panel">
       <div class="video-wrap" id="video-wrap-rec">
         <video id="video-rec" autoplay muted playsinline></video>
-        <div class="rec-indicator on" id="rec-indicator"><span class="rec-dot"></span>REC</div>
-        <div class="timer" id="timer-rec">00:00</div>
+        <div class="rec-indicator" id="rec-indicator"><span class="rec-dot"></span>REC</div>
+        <div class="timer" id="timer-rec" style="display:none;">00:00</div>
         <div id="ts-overlay" style="position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.6);color:#fff;font:600 13px/1.2 monospace;padding:6px 10px;border-radius:6px;letter-spacing:.5px;"></div>
         <div class="focus-reticle" id="focus-reticle"></div>
       </div>
@@ -946,10 +946,20 @@ async function startInspection() {
   state.videoMime = '';
 
   show('record');
-  const status = document.getElementById('status-rec');
+  const status    = document.getElementById('status-rec');
   const submitBtn = document.getElementById('rec-submit-btn');
+  const recInd    = document.getElementById('rec-indicator');
+  const timerEl   = document.getElementById('timer-rec');
+
+  // Make sure the REC badge + timer are OFF until the camera is actually
+  // recording. Without this, navigating into this screen would show the
+  // red "REC" pill and "00:00" overlay BEFORE iOS even prompted for
+  // camera permission — making the user believe they were already
+  // recording while the permission dialog was still up.
+  if (recInd)  recInd.classList.remove('on');
+  if (timerEl) { timerEl.style.display = 'none'; timerEl.textContent = '00:00'; }
   submitBtn.disabled = true;
-  status.textContent = 'Starting camera…';
+  status.textContent = 'Requesting camera access…';
   startTimestampOverlay();
 
   try {
@@ -968,6 +978,7 @@ async function startInspection() {
       },
       audio: false,
     });
+    status.textContent = 'Starting camera…';
     const settings = await applyCameraTuning(mediaStream);
     const videoEl = document.getElementById('video-rec');
     videoEl.srcObject = mediaStream;
@@ -989,6 +1000,9 @@ async function startInspection() {
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.start();
     recordStart = Date.now();
+    // Recording really started — now show the live indicators.
+    if (recInd)  recInd.classList.add('on');
+    if (timerEl) timerEl.style.display = '';
     timerInterval = setInterval(updateRecordTimer, 250);
 
     const dims = settings && settings.width && settings.height
@@ -1108,6 +1122,13 @@ function stopCamera() {
     try { mediaRecorder.stop(); } catch {}
   }
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  // Clear the on-screen recording indicators so a subsequent navigation
+  // to /record (or a cancel + restart) doesn't briefly flash a stale
+  // REC pill or running timer from the previous session.
+  const recInd  = document.getElementById('rec-indicator');
+  const timerEl = document.getElementById('timer-rec');
+  if (recInd)  recInd.classList.remove('on');
+  if (timerEl) { timerEl.style.display = 'none'; timerEl.textContent = '00:00'; }
 }
 
 // Decode one frame from a freshly-recorded blob and return the average
