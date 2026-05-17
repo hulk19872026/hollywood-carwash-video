@@ -22,10 +22,12 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   DeleteObjectsCommand,
   CopyObjectCommand,
 } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import 'dotenv/config';
 
@@ -65,6 +67,11 @@ if (!R2_READY) console.warn('⚠️  R2 env vars missing. Upload + reports endpo
 
 let s3 = null;
 if (R2_READY) {
+  // Explicit timeouts + retries. Default SDK behavior leaves connectionTimeout
+  // and socketTimeout unset, so a stuck R2 socket can hang a worker for
+  // minutes. 15s/60s lets us fail fast on transient blips and retry. R2
+  // returns standard S3 5xx codes on internal hiccups; maxAttempts=5 with
+  // adaptive backoff smooths those over without our own retry loop.
   s3 = new S3Client({
     region: 'auto',
     endpoint: R2_ENDPOINT,
@@ -72,6 +79,12 @@ if (R2_READY) {
       accessKeyId: R2_ACCESS_KEY_ID,
       secretAccessKey: R2_SECRET_ACCESS_KEY,
     },
+    maxAttempts: 5,
+    retryMode: 'adaptive',
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: 15_000,
+      socketTimeout: 60_000,
+    }),
   });
 }
 
@@ -80,10 +93,30 @@ app.disable('x-powered-by');
 app.set('trust proxy', true);
 app.use(express.json({ limit: '20mb' }));
 
-app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+// Per-request ID: prefer the client's X-Request-ID so a single inspection's
+// presign → PUT → finalize chain shares one trace, otherwise generate one.
+// Logged on every line, echoed in error responses, surfaced in the upload
+// queue activity log via response headers.
+app.use((req, res, next) => {
+  const incoming = req.headers['x-request-id'];
+  req.id = (typeof incoming === 'string' && /^[A-Za-z0-9._-]{8,64}$/.test(incoming))
+    ? incoming
+    : crypto.randomBytes(8).toString('hex');
+  res.setHeader('X-Request-ID', req.id);
+  const started = Date.now();
+  res.on('finish', () => {
+    console.log(`${new Date().toISOString()} rid=${req.id} ${req.method} ${req.url} ${res.statusCode} ${Date.now() - started}ms`);
+  });
   next();
 });
+
+function sendError(res, status, code, message, extra) {
+  // Structured error envelope. Always includes the request ID so a frontend
+  // toast can show the user "report id: rid=xxxx" and we can grep server logs.
+  const body = { error: code, message, requestId: res.req?.id };
+  if (extra && typeof extra === 'object') Object.assign(body, extra);
+  return res.status(status).json(body);
+}
 
 // ----- helpers -----
 function sanitize(s) {
@@ -349,14 +382,20 @@ app.get('/api/auth/whoami', requireAuth, async (req, res) => {
 // ============================================================
 app.post('/api/analyze', async (req, res) => {
   if (!API_KEY) {
-    return res.status(500).json({ error: { type: 'config_error', message: 'Server is missing ANTHROPIC_API_KEY env var' } });
+    return res.status(500).json({ error: { type: 'config_error', message: 'Server is missing ANTHROPIC_API_KEY env var', requestId: req.id } });
   }
   if (!req.body || !Array.isArray(req.body.messages)) {
-    return res.status(400).json({ error: { type: 'bad_request', message: 'messages array required' } });
+    return res.status(400).json({ error: { type: 'bad_request', message: 'messages array required', requestId: req.id } });
   }
+  // Without an explicit AbortController, a hung Anthropic socket would tie up
+  // this request indefinitely (Express has no default request timeout) and
+  // starve the worker. 90s is comfortably above p99 latency for vision calls.
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 90_000);
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: ac.signal,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': API_KEY,
@@ -371,8 +410,17 @@ app.post('/api/analyze', async (req, res) => {
     const data = await r.json();
     return res.status(r.status).json(data);
   } catch (e) {
-    console.error('Anthropic call failed:', e);
-    return res.status(500).json({ error: { type: 'upstream_error', message: e.message } });
+    const timedOut = e.name === 'AbortError';
+    console.error(`rid=${req.id} Anthropic call ${timedOut ? 'TIMED OUT' : 'failed'}:`, e.message);
+    return res.status(timedOut ? 504 : 500).json({
+      error: {
+        type: timedOut ? 'upstream_timeout' : 'upstream_error',
+        message: timedOut ? 'Anthropic API did not respond within 90s' : e.message,
+        requestId: req.id,
+      },
+    });
+  } finally {
+    clearTimeout(timer);
   }
 });
 
@@ -468,27 +516,80 @@ app.post('/api/finalize-report', requireAuth, async (req, res) => {
   try {
     const { reportId, metadata, uploadedKeys } = req.body || {};
     if (!reportId || !metadata) {
-      return res.status(400).json({ error: 'bad_request', message: 'reportId and metadata required' });
+      return sendError(res, 400, 'bad_request', 'reportId and metadata required');
     }
     const id = sanitize(reportId);
+    const prefix = reportPrefix(req.user.username, id);
+    const keys = (uploadedKeys && typeof uploadedKeys === 'object') ? uploadedKeys : {};
+
+    // Verify every claimed upload actually exists in R2 before we write
+    // metadata.json. Without this, a partially-failed upload would still
+    // produce a "successful" report with missing files — the exact silent-
+    // failure mode we're hardening against. HeadObject is cheap (no body
+    // transfer) and the SDK's adaptive retry handles transient R2 blips.
+    const expectedKinds = Object.keys(keys);
+    if (!expectedKinds.length) {
+      console.warn(`rid=${req.id} finalize-report ${id}: no uploadedKeys claimed`);
+      return sendError(res, 400, 'no_uploads',
+        'finalize-report rejected: no files claimed as uploaded. Re-queue from the client.');
+    }
+
+    const missing = [];
+    const verified = {};
+    await Promise.all(expectedKinds.map(async (kind) => {
+      const key = keys[kind];
+      if (typeof key !== 'string' || !key.startsWith(prefix)) {
+        // Reject keys that don't belong to this user's prefix — defends
+        // against a client trying to "finalize" a report by pointing at
+        // someone else's object.
+        missing.push({ kind, reason: 'bad_key' });
+        return;
+      }
+      try {
+        const head = await s3.send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+        if (!head.ContentLength || head.ContentLength <= 0) {
+          missing.push({ kind, reason: 'empty', key });
+        } else {
+          verified[kind] = { key, size: head.ContentLength, etag: head.ETag };
+        }
+      } catch (e) {
+        const code = e.$metadata?.httpStatusCode;
+        missing.push({
+          kind,
+          reason: (e.name === 'NotFound' || code === 404) ? 'not_found' : 'head_error',
+          key,
+          detail: e.message,
+        });
+      }
+    }));
+
+    if (missing.length) {
+      console.error(`rid=${req.id} finalize-report ${id}: missing uploads`, missing);
+      return sendError(res, 409, 'uploads_missing',
+        `R2 does not have ${missing.length} file(s) the client claimed to upload. Re-upload the missing parts.`,
+        { missing, verified: Object.keys(verified) });
+    }
+
     const body = JSON.stringify({
       ...metadata,
       reportId: id,
       owner: req.user.username,
-      uploadedKeys: uploadedKeys || {},
+      uploadedKeys: keys,
+      verifiedUploads: verified,
       finalizedAt: new Date().toISOString(),
+      finalizeRequestId: req.id,
     }, null, 2);
     await s3.send(new PutObjectCommand({
       Bucket: R2_BUCKET,
-      Key: `${reportPrefix(req.user.username, id)}metadata.json`,
+      Key: `${prefix}metadata.json`,
       Body: body,
       ContentType: 'application/json',
     }));
-    console.log(`✓ Finalized report ${id} for ${req.user.username}`);
-    res.json({ ok: true, reportId: id });
+    console.log(`rid=${req.id} ✓ Finalized report ${id} for ${req.user.username} (verified=${Object.keys(verified).join(',')})`);
+    res.json({ ok: true, reportId: id, verified, requestId: req.id });
   } catch (e) {
-    console.error('finalize-report failed:', e);
-    res.status(500).json({ ok: false, error: e.message });
+    console.error(`rid=${req.id} finalize-report failed:`, e);
+    sendError(res, 500, 'finalize_failed', e.message);
   }
 });
 
@@ -571,6 +672,52 @@ app.get('/api/reports/:id/:file', requireAuth, async (req, res) => {
   } catch (e) {
     console.error('presign-get failed:', e);
     res.status(404).end();
+  }
+});
+
+// ============================================================
+//  GET /api/queue/status — server-side view of incomplete reports
+//  Lists the caller's report folders, flagging ones missing metadata.json
+//  (= upload was never finalized) or with zero file objects. Used by the
+//  upload queue UI to reconcile what the client *thinks* uploaded with
+//  what R2 actually has.
+// ============================================================
+app.get('/api/queue/status', requireAuth, async (req, res) => {
+  if (!requireR2(res)) return;
+  try {
+    const userPrefix = `reports/${req.user.username}/`;
+    const top = await s3.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET, Prefix: userPrefix, Delimiter: '/',
+    }));
+    const ids = (top.CommonPrefixes || [])
+      .map(p => p.Prefix.replace(userPrefix, '').replace(/\/$/, ''))
+      .filter(Boolean);
+
+    const incomplete = [];
+    for (const id of ids) {
+      const folder = `${userPrefix}${id}/`;
+      const inner = await s3.send(new ListObjectsV2Command({ Bucket: R2_BUCKET, Prefix: folder }));
+      const objects = inner.Contents || [];
+      const hasMeta  = objects.some(c => c.Key === `${folder}metadata.json`);
+      const fileObjs = objects.filter(c => !c.Key.endsWith('/metadata.json'));
+      if (!hasMeta || !fileObjs.length) {
+        incomplete.push({
+          id,
+          hasMetadata: hasMeta,
+          fileCount: fileObjs.length,
+          objectKeys: objects.map(c => c.Key.slice(folder.length)),
+        });
+      }
+    }
+    res.json({
+      username:   req.user.username,
+      totalFolders: ids.length,
+      incomplete,
+      requestId: req.id,
+    });
+  } catch (e) {
+    console.error(`rid=${req.id} queue/status failed:`, e);
+    sendError(res, 500, 'queue_status_failed', e.message);
   }
 });
 
@@ -793,12 +940,12 @@ app.post(
 //  404 + error handlers (must be registered last so real routes win)
 // ============================================================
 app.use((req, res) => {
-  res.status(404).json({ error: 'not_found', path: req.url });
+  res.status(404).json({ error: 'not_found', path: req.url, requestId: req.id });
 });
 
-app.use((err, _req, res, _next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'internal_error', message: err.message });
+app.use((err, req, res, _next) => {
+  console.error(`rid=${req?.id} Unhandled error:`, err);
+  res.status(500).json({ error: 'internal_error', message: err.message, requestId: req?.id });
 });
 
 process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));

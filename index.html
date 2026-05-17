@@ -1581,11 +1581,24 @@ async function stopAndSubmit() {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   stopCamera();
 
+  // Guard against an empty recording — better to refuse here with a clear
+  // message than to queue a 0-byte upload that the server will reject and
+  // surface as a generic "empty_body" error on the queue screen.
+  if (!blob || blob.size === 0) {
+    if (submitBtn) submitBtn.disabled = false;
+    alert('No video was recorded. Please try again — make sure you start recording before pressing Send.');
+    return;
+  }
+
   // Send analysis off to the background and bounce back to home immediately.
   show('home');
   processInspection(blob).catch((e) => {
     console.error('background analysis failed:', e);
-    alert('Background analysis failed:\n\n' + (e.message || e));
+    // Don't alert if it's just the analysis that failed and the video is safely
+    // queued — the queue UI already surfaces the analysis error.
+    if (!state.queuedReportId) {
+      alert('Inspection upload could not start:\n\n' + (e.message || e));
+    }
   });
 }
 
@@ -1594,52 +1607,128 @@ async function processInspection(videoBlob) {
   state.videoBlob = videoBlob;
   state.videoMime = recordedMime;
 
-  const frames = await extractFrames(videoBlob, 8);
-  state.exteriorFrames = frames;
-  state.interiorFrames = [];
-
-  const extRaw = await analyzeWithClaude(frames, EXTERIOR_PROMPT);
-  const exteriorAnalysis = safeParseJson(extRaw) || { _raw: extRaw };
-
-  state.analysis = {
-    exterior: exteriorAnalysis,
-    interior: { overall_condition: '—', summary: '', items_visible: [] },
-    exteriorRaw: extRaw,
-    interiorRaw: '',
-  };
-
-  // Draw bounding boxes + labels onto frames that actually have damage.
-  // Never let an annotation failure block the report — fall back to
-  // unannotated frames if anything throws.
-  try {
-    const dmg = (exteriorAnalysis && exteriorAnalysis.damage) || [];
-    const { annotated, crops } = await buildAnnotations(frames, dmg);
-    state.annotatedFrames = annotated;
-    state.damageCrops     = crops;
-  } catch (e) {
-    console.warn('buildAnnotations failed:', e);
-    state.annotatedFrames = [];
-    state.damageCrops     = [];
-  }
-
-  // Name the report by plate if AI got one; otherwise timestamp.
-  const plate = (exteriorAnalysis.license_plate && exteriorAnalysis.license_plate.number)
-    ? sanitizeName(exteriorAnalysis.license_plate.number)
-    : '';
+  // Bullet-proof persistence: queue the video to IndexedDB BEFORE we touch
+  // anything that can fail (extractFrames decode, Anthropic call, PDF build).
+  // Without this the entire inspection lives only in memory — a single
+  // analysis exception, tab close, or device sleep destroys the recording
+  // with no record on disk. queueForUpload writes to IndexedDB and that
+  // survives crashes / closes / reloads. metadataPending tells the upload
+  // worker to push the video to R2 right away but defer the finalize call
+  // until we've layered in the analysis result + PDF below.
   const now = new Date();
   const ts = now.getFullYear() + pad2(now.getMonth()+1) + pad2(now.getDate()) + '-' + pad2(now.getHours()) + pad2(now.getMinutes()) + pad2(now.getSeconds());
-  state.reportName = plate ? `HCW-${plate}-${ts}` : `HCW-${ts}`;
+  const provisionalId = `HCW-${ts}`;
+  state.reportName = provisionalId;
+  state.queuedReportId = provisionalId;
+  try {
+    await queueForUpload({
+      reportId: provisionalId,
+      metadata: { reportId: provisionalId, timestamp: now.toISOString(), analysisPending: true },
+      pdfBlob: null,
+      videoBlob,
+      videoMime: recordedMime,
+      metadataPending: true,
+    });
+    actLog('ok', `${provisionalId} video persisted to queue before analysis`);
+  } catch (e) {
+    // IndexedDB write failed (private mode, quota). Surface loudly — without
+    // it we can't guarantee delivery.
+    actLog('err', `${provisionalId} FAILED to persist video to queue: ${e.message || e}`);
+    alert('Could not save your inspection locally. Storage may be full or in private mode.\n\n' + (e.message || e));
+    throw e;
+  }
+
+  let analysisError = null;
+  try {
+    const frames = await extractFrames(videoBlob, 8);
+    state.exteriorFrames = frames;
+    state.interiorFrames = [];
+
+    const extRaw = await analyzeWithClaude(frames, EXTERIOR_PROMPT);
+    const exteriorAnalysis = safeParseJson(extRaw) || { _raw: extRaw };
+
+    state.analysis = {
+      exterior: exteriorAnalysis,
+      interior: { overall_condition: '—', summary: '', items_visible: [] },
+      exteriorRaw: extRaw,
+      interiorRaw: '',
+    };
+
+    try {
+      const dmg = (exteriorAnalysis && exteriorAnalysis.damage) || [];
+      const { annotated, crops } = await buildAnnotations(frames, dmg);
+      state.annotatedFrames = annotated;
+      state.damageCrops     = crops;
+    } catch (e) {
+      console.warn('buildAnnotations failed:', e);
+      state.annotatedFrames = [];
+      state.damageCrops     = [];
+    }
+
+    const plate = (exteriorAnalysis.license_plate && exteriorAnalysis.license_plate.number)
+      ? sanitizeName(exteriorAnalysis.license_plate.number)
+      : '';
+    if (plate) state.reportName = `HCW-${plate}-${ts}`;
+  } catch (e) {
+    analysisError = e;
+    console.error('analysis failed:', e);
+    actLog('err', `${provisionalId} analysis failed (video still uploading): ${e.message || e}`);
+  }
 
   let pdfBlob = null;
-  try {
-    pdfBlob = await buildPdf();
-    state.pdfBlob = pdfBlob;
-  } catch (e) {
-    // PDF rendering must never block the upload — the video is the
-    // source of truth and has to reach R2 either way.
-    console.error('buildPdf failed; uploading video without PDF:', e);
+  if (!analysisError) {
+    try {
+      pdfBlob = await buildPdf();
+      state.pdfBlob = pdfBlob;
+    } catch (e) {
+      // PDF rendering must never block the upload — the video is the
+      // source of truth and has to reach R2 either way.
+      console.error('buildPdf failed; uploading video without PDF:', e);
+      actLog('warn', `${provisionalId} PDF build failed (video still uploading): ${e.message || e}`);
+    }
   }
-  await saveToFolder(pdfBlob);
+
+  // Layer the analysis + PDF onto the already-queued job and release it
+  // for finalize. Same reportId = same R2 folder, no rename, no orphan.
+  const finalMetadata = analysisError
+    ? {
+        reportId: provisionalId,
+        timestamp: now.toISOString(),
+        analysisError: String(analysisError.message || analysisError),
+      }
+    : {
+        reportId: provisionalId,
+        analysis: state.analysis,
+        timestamp: now.toISOString(),
+      };
+  try {
+    await updateQueueJob(provisionalId, (job) => ({
+      ...job,
+      metadata: finalMetadata,
+      files: { ...(job.files || {}), ...(pdfBlob ? { pdf: pdfBlob } : {}) },
+      metadataPending: false,
+      // If analysis took long enough that the worker tripped retries on the
+      // metadataPending no-op, clear them so finalize starts fresh.
+      attempts: 0,
+      permanentlyFailed: false,
+      lastError: null,
+    }));
+    actLog('ok', `${provisionalId} metadata + PDF attached, released for finalize`);
+  } catch (e) {
+    actLog('err', `${provisionalId} could not attach metadata to queued job: ${e.message || e}`);
+  }
+
+  // Trigger downloads with a locally-captured name. state.reportName can
+  // get overwritten if the user starts a new inspection before this one
+  // finishes analysis; the downloads must stay tied to this inspection.
+  const downloadName = state.reportName || provisionalId;
+  if (pdfBlob) triggerDownload(pdfBlob, downloadName + '.pdf');
+  const vidExt = extForMime(recordedMime || videoBlob.type);
+  triggerDownload(videoBlob, downloadName + vidExt);
+
+  processQueue().catch(() => {});
+
+  if (analysisError) throw analysisError;
 }
 
 function pad2(n) { return String(n).padStart(2, '0'); }
@@ -2073,6 +2162,16 @@ async function qGet(id)  { const s = await qTx('readonly');  return new Promise(
 async function qAll()    { const s = await qTx('readonly');  return new Promise((r,e)=>{const q=s.getAll();q.onsuccess=()=>r(q.result||[]);q.onerror=()=>e(q.error);}); }
 async function qDel(id)  { const s = await qTx('readwrite'); return new Promise((r,e)=>{const q=s.delete(id);q.onsuccess=()=>r();q.onerror=()=>e(q.error);}); }
 
+// Read-modify-write a single job. Used to layer analysis results onto a
+// video that was queued before the analysis ran.
+async function updateQueueJob(id, mutator) {
+  const current = await qGet(id);
+  if (!current) throw new Error(`updateQueueJob: ${id} not in queue`);
+  const next = mutator(current);
+  if (!next || next.reportId !== id) throw new Error(`updateQueueJob: mutator must preserve reportId=${id}`);
+  await qPut(next);
+}
+
 let _qProcessing = false;
 
 // ============================================================
@@ -2113,7 +2212,7 @@ function queueLogSummary() {
   return '';
 }
 
-async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMime }) {
+async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMime, metadataPending }) {
   const job = {
     reportId,
     metadata,
@@ -2129,6 +2228,7 @@ async function queueForUpload({ reportId, metadata, pdfBlob, videoBlob, videoMim
     attempts: 0,
     lastError: null,
     queuedAt: new Date().toISOString(),
+    metadataPending: !!metadataPending,
   };
   await qPut(job);
   const sizes = Object.entries(job.files).map(([k,b]) => `${k} ${formatBytes(b?.size||0)}`).join(' + ');
@@ -2145,16 +2245,54 @@ async function processQueue() {
   try {
     const jobs = await qAll();
     if (!jobs.length) { actLog('info', 'tick — queue empty'); return; }
-    actLog('info', `tick — ${jobs.length} job(s)`);
-    for (const job of jobs) {
+    const active = jobs.filter(j => {
+      if (j.permanentlyFailed) return false;
+      // Skip jobs that have already uploaded everything and are just waiting
+      // on processInspection to attach final metadata — no point retrying
+      // a no-op every 30s. uploadJob() will be re-triggered by
+      // processInspection's processQueue() call once the flag clears.
+      if (j.metadataPending) {
+        const pendingKinds = Object.keys(j.files || {}).filter(k => !j.uploadedKeys?.[k]);
+        if (!pendingKinds.length) return false;
+      }
+      return true;
+    });
+    const dead    = jobs.filter(j => j.permanentlyFailed).length;
+    const waiting = jobs.length - active.length - dead;
+    actLog('info', `tick — ${jobs.length} job(s)${dead ? ` (${dead} need manual retry)` : ''}${waiting ? ` (${waiting} waiting on analysis)` : ''}`);
+    for (const job of active) {
       try {
         await uploadJob(job);
-        actLog('ok', `${job.reportId} uploaded`);
+        if (!job.permanentlyFailed) actLog('ok', `${job.reportId} uploaded`);
       } catch (e) {
         const msg = String(e.message || e);
         console.warn('Upload failed for', job.reportId, e);
         actLog('err', `${job.reportId} FAIL — ${msg}`);
-        await qPut({ ...job, status: 'failed', lastError: msg, attempts: (job.attempts || 0) + 1 });
+        // Re-read to pick up any in-flight uploadedKeys changes uploadJob made.
+        const current = (await qGet(job.reportId)) || job;
+        if (current.permanentlyFailed) {
+          updateQueueBadge();
+          continue;
+        }
+        // Auth errors mean "user action needed", not "the upload is broken".
+        // Don't burn through MAX_UPLOAD_ATTEMPTS while the user is on the
+        // login screen — that would leave them with a permanently-failed
+        // job needing manual retry the moment they log back in.
+        if (e.isAuthError) {
+          await qPut({ ...current, status: 'failed', lastError: msg, lastFailedAt: new Date().toISOString() });
+          updateQueueBadge();
+          continue;
+        }
+        const attempts = (current.attempts || 0) + 1;
+        const hitCap = attempts >= MAX_UPLOAD_ATTEMPTS;
+        await qPut({
+          ...current,
+          status: 'failed',
+          lastError: msg,
+          attempts,
+          lastFailedAt: new Date().toISOString(),
+          permanentlyFailed: hitCap,
+        });
       }
       updateQueueBadge();
     }
@@ -2171,6 +2309,22 @@ function fetchWithTimeout(url, opts = {}, ms = 30000) {
     .finally(() => clearTimeout(timer));
 }
 
+// Exponential backoff with jitter. Pure-linear delay (500ms * i) can sync up
+// retries from multiple tabs, hammering the server. Capped at 30s so a
+// pathological server doesn't make us wait forever between attempts.
+function backoffDelay(attemptIndex) {
+  const base = Math.min(30_000, 500 * Math.pow(2, attemptIndex));
+  return Math.floor(base / 2 + Math.random() * (base / 2));
+}
+
+// Stable per-job correlation token. Sent as X-Request-ID so server logs
+// can be grep'd by reportId without parsing payloads.
+function makeRequestId(reportId, label) {
+  const r = Math.random().toString(36).slice(2, 8);
+  const safe = String(reportId).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 32);
+  return `${label}-${safe}-${r}`;
+}
+
 // iOS Safari throws TypeError "Load failed" from backgrounded tabs whose
 // HTTP/2 connections went stale. The first fetch after wake fails; the
 // second usually succeeds. Retry transient errors a couple of times before
@@ -2180,7 +2334,6 @@ async function fetchWithRetry(url, opts, ms, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
     try {
       const r = await fetchWithTimeout(url, opts, ms);
-      // Retry on 5xx but not 4xx (4xx is a real client error).
       if (r.status >= 500 && r.status < 600 && i < attempts - 1) {
         lastErr = new Error(`HTTP ${r.status}`);
       } else {
@@ -2190,7 +2343,7 @@ async function fetchWithRetry(url, opts, ms, attempts = 3) {
       lastErr = e;
       if (e.name === 'AbortError') throw e;
     }
-    await new Promise(res => setTimeout(res, 500 * (i + 1)));
+    await new Promise(res => setTimeout(res, backoffDelay(i)));
   }
   throw lastErr;
 }
@@ -2202,7 +2355,7 @@ const API_TIMEOUT_MS = 30 * 1000;
 // iOS Safari fetch() with PUT + Blob body throws a generic "Load failed" on
 // cellular and offers no progress signal. XHR is more reliable for blob
 // uploads on iOS and exposes status/responseText for diagnostics.
-function xhrPut(url, body, contentType, timeoutMs) {
+function xhrPut(url, body, contentType, timeoutMs, requestId) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const started = Date.now();
@@ -2210,8 +2363,13 @@ function xhrPut(url, body, contentType, timeoutMs) {
     xhr.open('PUT', url, true);
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader('Content-Type', contentType);
+    if (requestId) xhr.setRequestHeader('X-Request-ID', requestId);
     if (xhr.upload) xhr.upload.onprogress = (e) => { if (e.loaded) sent = e.loaded; };
-    xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText || '' });
+    xhr.onload = () => resolve({
+      status: xhr.status,
+      body: xhr.responseText || '',
+      requestId: xhr.getResponseHeader('X-Request-ID') || requestId || null,
+    });
     xhr.onerror = () => {
       const dt = ((Date.now() - started) / 1000).toFixed(1);
       const total = body && body.size != null ? body.size : null;
@@ -2229,12 +2387,35 @@ function xhrPut(url, body, contentType, timeoutMs) {
   });
 }
 
+// Per-PUT retry. A single transient cellular drop shouldn't fail the whole
+// inspection — the queue's per-job retry would re-presign and re-PUT
+// everything anyway, but doing it here lets a 50MB video survive a momentary
+// network blip without restarting from byte 0 of a fresh attempt.
+async function xhrPutRetry(url, body, contentType, timeoutMs, requestId, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const r = await xhrPut(url, body, contentType, timeoutMs, requestId);
+      if (r.status >= 500 && r.status < 600 && i < attempts - 1) {
+        lastErr = new Error(`PUT HTTP ${r.status}`);
+      } else {
+        return r;
+      }
+    } catch (e) {
+      lastErr = e;
+      if (e.name === 'TimeoutError') throw e;
+    }
+    await new Promise(res => setTimeout(res, backoffDelay(i)));
+  }
+  throw lastErr;
+}
+
 // iOS Safari has been seen to reject same-origin fetch() POSTs with bare
 // "Load failed" while XHR to the exact same URL succeeds (WebKit fetch
 // connection-pool wedge, Lockdown Mode interaction, content blockers).
 // Use XHR for the API JSON calls so a stuck fetch stack doesn't keep the
 // upload queue from ever progressing.
-function xhrPostJson(url, bodyObj, timeoutMs) {
+function xhrPostJson(url, bodyObj, timeoutMs, requestId) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url, true);
@@ -2244,10 +2425,16 @@ function xhrPostJson(url, bodyObj, timeoutMs) {
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.setRequestHeader('Accept', 'application/json');
+    if (requestId) xhr.setRequestHeader('X-Request-ID', requestId);
     xhr.onload = () => {
       let json = null;
       try { json = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch {}
-      resolve({ status: xhr.status, body: xhr.responseText || '', json });
+      resolve({
+        status: xhr.status,
+        body: xhr.responseText || '',
+        json,
+        requestId: xhr.getResponseHeader('X-Request-ID') || requestId || null,
+      });
     };
     xhr.onerror = () => reject(new Error('network error'));
     xhr.ontimeout = () => { const e = new Error('timed out'); e.name = 'TimeoutError'; reject(e); };
@@ -2256,13 +2443,13 @@ function xhrPostJson(url, bodyObj, timeoutMs) {
   });
 }
 
-async function xhrPostJsonRetry(url, bodyObj, timeoutMs, attempts = 3) {
+async function xhrPostJsonRetry(url, bodyObj, timeoutMs, requestId, attempts = 3) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      const r = await xhrPostJson(url, bodyObj, timeoutMs);
+      const r = await xhrPostJson(url, bodyObj, timeoutMs, requestId);
       if (r.status >= 500 && r.status < 600 && i < attempts - 1) {
-        lastErr = new Error(`HTTP ${r.status}`);
+        lastErr = new Error(`HTTP ${r.status}${r.requestId ? ` rid=${r.requestId}` : ''}`);
       } else {
         return r;
       }
@@ -2270,14 +2457,22 @@ async function xhrPostJsonRetry(url, bodyObj, timeoutMs, attempts = 3) {
       lastErr = e;
       if (e.name === 'TimeoutError') throw e;
     }
-    await new Promise(res => setTimeout(res, 500 * (i + 1)));
+    await new Promise(res => setTimeout(res, backoffDelay(i)));
   }
   throw lastErr;
 }
 
 async function uploadJob(job) {
+  if (job.permanentlyFailed) {
+    // The job tripped MAX_UPLOAD_ATTEMPTS earlier. Don't auto-retry — that
+    // would overwrite the real lastError with a meaningless "gave up after N
+    // attempts" message and churn forever. User must hit Retry to resume.
+    return;
+  }
   if ((job.attempts || 0) >= MAX_UPLOAD_ATTEMPTS) {
-    throw new Error(`gave up after ${job.attempts} attempts (last: ${job.lastError || 'unknown'})`);
+    await qPut({ ...job, status: 'failed', permanentlyFailed: true,
+      lastError: `gave up after ${job.attempts} attempts — last error: ${job.lastError || 'unknown'}` });
+    throw new Error(`gave up after ${job.attempts} attempts`);
   }
   await qPut({ ...job, status: 'uploading' });
   const kinds = Object.keys(job.files).filter(k => !job.uploadedKeys?.[k]);
@@ -2285,11 +2480,12 @@ async function uploadJob(job) {
 
   if (kinds.length) {
     let r;
-    actLog('info', `${job.reportId} → POST /api/presign-upload`);
+    const presignRid = makeRequestId(job.reportId, 'presign');
+    actLog('info', `${job.reportId} → POST /api/presign-upload rid=${presignRid}`);
     try {
       r = await xhrPostJsonRetry('/api/presign-upload',
         { reportId: job.reportId, files: kinds, mimes: job.mimes || {} },
-        API_TIMEOUT_MS);
+        API_TIMEOUT_MS, presignRid);
     } catch (e) {
       actLog('err', `${job.reportId} presign threw — ${e.message || e}`);
       throw new Error(`presign-upload ${e.name === 'TimeoutError' ? 'timed out' : 'failed: ' + (e.message || e)}`);
@@ -2297,15 +2493,17 @@ async function uploadJob(job) {
     if (r.status === 401) {
       actLog('err', `${job.reportId} presign 401 (session expired)`);
       handleAuthExpired();
-      throw new Error('presign-upload 401 — session expired. Sign in again and the upload will resume automatically.');
+      const err = new Error('presign-upload 401 — session expired. Sign in again and the upload will resume automatically.');
+      err.isAuthError = true;
+      throw err;
     }
     if (r.status < 200 || r.status >= 300) {
-      actLog('err', `${job.reportId} presign HTTP ${r.status}`);
-      throw new Error('presign-upload ' + r.status + (r.body ? ' — ' + r.body.slice(0, 200) : ''));
+      actLog('err', `${job.reportId} presign HTTP ${r.status} rid=${r.requestId || presignRid}`);
+      throw new Error('presign-upload ' + r.status + (r.body ? ' — ' + r.body.slice(0, 200) : '') + ` [rid=${r.requestId || presignRid}]`);
     }
     const uploads = (r.json && r.json.uploads) || {};
     const sampleUrl = (Object.values(uploads)[0] || {}).url || '';
-    actLog('info', `${job.reportId} presign ok, target=${sampleUrl.startsWith('/api/proxy-upload') ? 'PROXY' : 'r2-direct'}`);
+    actLog('info', `${job.reportId} presign ok rid=${r.requestId || presignRid}, target=${sampleUrl.startsWith('/api/proxy-upload') ? 'PROXY' : 'r2-direct'}`);
 
     const uploadedKeys = { ...(job.uploadedKeys || {}) };
     const kindErrors = [];
@@ -2317,17 +2515,18 @@ async function uploadJob(job) {
       // overrides if blob.type carries ;codecs=... So re-wrap with the
       // exact content type the URL was signed with.
       const upBlob = blob.type === u.contentType ? blob : new Blob([blob], { type: u.contentType });
-      actLog('info', `${job.reportId} → PUT ${kind} (${formatBytes(upBlob.size)} ${u.contentType})`);
+      const putRid = makeRequestId(job.reportId, 'put-' + kind);
+      actLog('info', `${job.reportId} → PUT ${kind} (${formatBytes(upBlob.size)} ${u.contentType}) rid=${putRid}`);
       try {
-        const put = await xhrPut(u.url, upBlob, u.contentType, PUT_TIMEOUT_MS);
+        const put = await xhrPutRetry(u.url, upBlob, u.contentType, PUT_TIMEOUT_MS, putRid);
         if (put.status < 200 || put.status >= 300) {
           const detail = (put.body || '').slice(0, 200);
-          throw new Error(`PUT ${kind} returned ${put.status}${detail ? ' — ' + detail : ''}`);
+          throw new Error(`PUT ${kind} returned ${put.status}${detail ? ' — ' + detail : ''} [rid=${put.requestId || putRid}]`);
         }
         uploadedKeys[kind] = u.key;
         await qPut({ ...job, uploadedKeys, status: 'uploading' });
         job.uploadedKeys = uploadedKeys;
-        actLog('ok', `${job.reportId} PUT ${kind} ok (${put.status})`);
+        actLog('ok', `${job.reportId} PUT ${kind} ok (${put.status}) rid=${put.requestId || putRid}`);
       } catch (e) {
         const msg = e.name === 'TimeoutError'
           ? `PUT ${kind} timed out after ${Math.round(PUT_TIMEOUT_MS/1000)}s (${formatBytes(blob.size)})`
@@ -2340,14 +2539,25 @@ async function uploadJob(job) {
     if (kindErrors.length) throw new Error(kindErrors.join(' | '));
   }
 
+  // Hold off on finalize while the foreground analysis is still running.
+  // The video is in R2 now (durable); processInspection will call
+  // updateQueueJob to attach the PDF + final metadata and clear this flag,
+  // at which point the next processQueue tick will run finalize.
+  if (job.metadataPending) {
+    await qPut({ ...job, status: 'pending', lastError: null });
+    actLog('info', `${job.reportId} video uploaded — awaiting analysis to finalize`);
+    return;
+  }
+
   let fin;
-  actLog('info', `${job.reportId} → POST /api/finalize-report`);
+  const finRid = makeRequestId(job.reportId, 'finalize');
+  actLog('info', `${job.reportId} → POST /api/finalize-report rid=${finRid}`);
   try {
     fin = await xhrPostJsonRetry('/api/finalize-report', {
       reportId: job.reportId,
       metadata: job.metadata,
       uploadedKeys: job.uploadedKeys,
-    }, API_TIMEOUT_MS);
+    }, API_TIMEOUT_MS, finRid);
   } catch (e) {
     actLog('err', `${job.reportId} finalize threw — ${e.message || e}`);
     throw new Error(`finalize-report ${e.name === 'TimeoutError' ? 'timed out' : 'failed: ' + (e.message || e)}`);
@@ -2355,13 +2565,28 @@ async function uploadJob(job) {
   if (fin.status === 401) {
     actLog('err', `${job.reportId} finalize 401 (session expired)`);
     handleAuthExpired();
-    throw new Error('finalize-report 401 — session expired. Sign in again and the upload will resume automatically.');
+    const err = new Error('finalize-report 401 — session expired. Sign in again and the upload will resume automatically.');
+    err.isAuthError = true;
+    throw err;
+  }
+  if (fin.status === 409 && fin.json?.error === 'uploads_missing') {
+    // Server checked R2 with HeadObject and at least one file the client
+    // claimed to upload isn't actually there. Drop the bad keys from local
+    // state so the next attempt re-PUTs them instead of looping on the same
+    // failed finalize.
+    const missingKinds = (fin.json.missing || []).map(m => m.kind);
+    const cleanedKeys = { ...(job.uploadedKeys || {}) };
+    for (const k of missingKinds) delete cleanedKeys[k];
+    await qPut({ ...job, uploadedKeys: cleanedKeys });
+    job.uploadedKeys = cleanedKeys;
+    actLog('err', `${job.reportId} finalize 409 — R2 missing [${missingKinds.join(',')}] rid=${fin.requestId || finRid}; will re-PUT next tick`);
+    throw new Error(`R2 is missing uploaded file(s): ${missingKinds.join(', ')}. Re-uploading. [rid=${fin.requestId || finRid}]`);
   }
   if (fin.status < 200 || fin.status >= 300) {
-    actLog('err', `${job.reportId} finalize HTTP ${fin.status}`);
-    throw new Error('finalize-report ' + fin.status + (fin.body ? ' — ' + fin.body.slice(0, 200) : ''));
+    actLog('err', `${job.reportId} finalize HTTP ${fin.status} rid=${fin.requestId || finRid}`);
+    throw new Error('finalize-report ' + fin.status + (fin.body ? ' — ' + fin.body.slice(0, 200) : '') + ` [rid=${fin.requestId || finRid}]`);
   }
-  actLog('ok', `${job.reportId} finalize ok`);
+  actLog('ok', `${job.reportId} finalize ok rid=${fin.requestId || finRid}`);
 
   await qDel(job.reportId);
 }
@@ -2456,10 +2681,14 @@ async function renderQueueScreen() {
     (failed    ? ` · <span style="color:#ff9a9a;">${failed} failed</span>` : '');
 
   listEl.innerHTML = jobs.map(j => {
+    const allUploaded = Object.keys(j.files || {}).every(k => j.uploadedKeys?.[k]);
     const statusBadge =
-      j.status === 'uploading' ? '<span style="color:#ffd400;">⏳ SENDING</span>'
-      : j.status === 'failed'  ? '<span style="color:#ff9a9a;">⚠ FAILED</span>'
-      : '<span style="color:#88c5ff;">… QUEUED</span>';
+        j.permanentlyFailed                        ? '<span style="color:#ff5050;">⛔ NEEDS MANUAL RETRY</span>'
+      : (j.metadataPending && allUploaded)         ? '<span style="color:#9fd1ff;">🧠 VIDEO UPLOADED · WAITING FOR ANALYSIS</span>'
+      : j.metadataPending                          ? '<span style="color:#9fd1ff;">🧠 UPLOADING VIDEO · ANALYSIS IN PROGRESS</span>'
+      : j.status === 'uploading'                   ? '<span style="color:#ffd400;">⏳ SENDING</span>'
+      : j.status === 'failed'                      ? '<span style="color:#ff9a9a;">⚠ RETRYING</span>'
+                                                   : '<span style="color:#88c5ff;">… QUEUED</span>';
     const filesInfo = Object.entries(j.files || {})
       .map(([k, b]) => `${k} ${formatBytes(b?.size || 0)}`).join(' + ') || '—';
     const mimes = j.mimes ? Object.entries(j.mimes).map(([k,v]) => `${k}=${v}`).join('  ') : '';
@@ -2494,7 +2723,8 @@ async function retryQueueJob(encId) {
   const id = decodeURIComponent(encId);
   const j = await qGet(id);
   if (!j) { renderQueueScreen(); return; }
-  await qPut({ ...j, status: 'pending', attempts: 0 });
+  await qPut({ ...j, status: 'pending', attempts: 0, permanentlyFailed: false, lastError: null });
+  actLog('info', `${id} manual retry (counter reset)`);
   renderQueueScreen();
   processQueue().catch(() => {});
 }
@@ -2509,7 +2739,8 @@ async function deleteQueueJob(encId) {
 
 async function retryAllQueue() {
   const jobs = await qAll().catch(() => []);
-  for (const j of jobs) await qPut({ ...j, status: 'pending', attempts: 0 });
+  for (const j of jobs) await qPut({ ...j, status: 'pending', attempts: 0, permanentlyFailed: false, lastError: null });
+  actLog('info', `manual retry-all (${jobs.length} jobs, counters reset)`);
   renderQueueScreen();
   processQueue().catch(() => {});
 }
@@ -2523,7 +2754,59 @@ async function clearAllQueue() {
 
 window.addEventListener('online', processQueue);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) processQueue(); });
-window.addEventListener('load', () => { processQueue(); setInterval(processQueue, 30000); fetchBuildTag(); });
+
+// Reconcile stuck state on page load: a tab that was uploading when the
+// user closed it (or that crashed mid-PUT) leaves jobs marked 'uploading'
+// with no worker still attached. Demote those to 'pending' so the next tick
+// picks them up cleanly and the UI doesn't mislead the user into thinking
+// something is still in-flight.
+async function reconcileStuckJobs() {
+  // If a metadataPending job is older than this, the analysis tab almost
+  // certainly crashed mid-flow. Force-finalize with a placeholder so the
+  // video doesn't sit unfinalized in R2 forever.
+  const METADATA_PENDING_TTL_MS = 10 * 60 * 1000;
+  try {
+    const jobs = await qAll();
+    const now = Date.now();
+    for (const j of jobs) {
+      let next = j;
+      let changed = false;
+      if (j.status === 'uploading' && !j.permanentlyFailed) {
+        next = { ...next, status: 'pending' };
+        changed = true;
+        actLog('warn', `${j.reportId} was 'uploading' on load — reset to 'pending'`);
+      }
+      const queuedAt = j.queuedAt ? Date.parse(j.queuedAt) : 0;
+      if (j.metadataPending && queuedAt && (now - queuedAt) > METADATA_PENDING_TTL_MS) {
+        next = {
+          ...next,
+          metadataPending: false,
+          metadata: {
+            ...(j.metadata || {}),
+            reportId: j.reportId,
+            analysisRecovered: true,
+            analysisRecoveryReason: 'analysis did not complete before page reload',
+          },
+          attempts: 0,
+          permanentlyFailed: false,
+          lastError: null,
+        };
+        changed = true;
+        actLog('warn', `${j.reportId} stale metadataPending — finalizing without analysis`);
+      }
+      if (changed) await qPut(next);
+    }
+  } catch (e) {
+    actLog('err', `reconcile on load failed: ${e.message || e}`);
+  }
+}
+
+window.addEventListener('load', async () => {
+  await reconcileStuckJobs();
+  processQueue();
+  setInterval(processQueue, 30000);
+  fetchBuildTag();
+});
 
 let _buildTag = '—';
 async function fetchBuildTag() {
